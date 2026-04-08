@@ -10,6 +10,15 @@ This plan is structured top-down. **Layer 1** is the architecture overview — r
 
 ## Module Map
 
+
+Ok i am on board with the transition probabilities and the length of the single episode. One question i still have is if all of the episodes start in a calm regime. I think this could skew the results pretty significantly because i think it could learn that it is certainly in a calm regime at the begining. Can you explain this to me and make sure that we have a solution for this.
+
+
+
+After that I it seems that the spot market sim is complete. I think that the next step of the simulation is the inventory of the agent and the simulated lifts of the bids and asks
+
+
+
 The project has **7 modules** organized into 3 tiers:
 
 ```

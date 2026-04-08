@@ -2,6 +2,14 @@ using Distributions: Normal, pdf, cdf
 
 const STD_NORMAL = Normal(0, 1)
 
+function _d1_d2(S, K, r, q, σ, τ)
+    d1 = (log(S/K) + (r - q + 0.5σ^2)*τ) / (σ*√τ)
+    d2 = d1 - σ*√τ
+    return d1, d2
+end
+
+function bs_all(S, σ, contract, τ)
+
 function bs_greeks(
     S::Float64,
     K::Float64,
@@ -10,7 +18,7 @@ function bs_greeks(
     τ::Float64;
     call::Bool = true
 )
-    if τ < 1e-6
+    if τ < 1e-8
         return 0.0, 0.0
     end
 

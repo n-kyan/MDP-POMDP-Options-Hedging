@@ -1,10 +1,10 @@
 const HEDGE_FRACTIONS = [0.0, 0.25, 0.5, 0.75, 1.0]
 
-struct OptionPosition
+mutable struct OptionPosition
     K::Float64
-    T::Int
-    call::Bool
-    quantity::Float64
+    τ::Float64
+    is_call::Bool
+    quantity::Int
 end
 
 struct Portfolio
