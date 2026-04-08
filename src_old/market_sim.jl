@@ -251,7 +251,7 @@ Tracks the internal state of the volatility model between timesteps.
 struct ConstantVolState end
 
 struct RegimeVolState
-    regime::Int     # current regime index (1-based)
+    regime::Int # this is fine but needs to come from a random sample from the dist in RegimeSwitchingVol
 end
 
 # Initialize vol state from the vol model

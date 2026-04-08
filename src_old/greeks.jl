@@ -39,7 +39,7 @@ function bs_price(
     τ::Float64;
     call::Bool = true
 )
-    if τ < 1e-6
+    if τ < 1e-8
         return call ? max(S - K, 0.0) : max(K -S, 0.0)
     end
 
