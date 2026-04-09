@@ -1,9 +1,3 @@
-# ============================================================================
-# test_4_fills.jl — Tests for the fill model
-# ============================================================================
-# Run with: julia test_4_fills.jl
-# ============================================================================
-
 include("../src/1_types.jl")
 include("../src/2_black_scholes.jl")
 include("../src/4_fills.jl")
@@ -27,9 +21,7 @@ end
 
 config = SimConfig()  # A=140, k=6, Δt=1/252
 
-# ════════════════════════════════════════════════════════════════════════════
 # TEST 1: compute_quotes — basic symmetry
-# ════════════════════════════════════════════════════════════════════════════
 println("\n═══ TEST 1: compute_quotes ═══")
 
 V_believed = 4.50
@@ -46,9 +38,7 @@ for (i, δ) in enumerate(config.spread_levels)
     check("spread level $i: spread = $(2δ)", (q.ask_price - q.bid_price) ≈ 2δ)
 end
 
-# ════════════════════════════════════════════════════════════════════════════
 # TEST 2: fill_probability — basic properties
-# ════════════════════════════════════════════════════════════════════════════
 println("\n═══ TEST 2: fill_probability — basic properties ═══")
 
 A, k, Δt = config.A, config.k, config.Δt
@@ -78,9 +68,7 @@ check("negative δ clamps to δ=0", p_negative ≈ p_at_market)
 p_very_wide = fill_probability(5.0, A, k, Δt)
 check("very wide spread → P ≈ 0", p_very_wide < 0.01)
 
-# ════════════════════════════════════════════════════════════════════════════
 # TEST 3: fill_probability — across all 5 spread levels
-# ════════════════════════════════════════════════════════════════════════════
 println("\n═══ TEST 3: fill_probability — spread level calibration ═══")
 
 println("  Spread level fill probabilities (per side, per step):")
@@ -96,9 +84,7 @@ check("tightest level has meaningful fill rate (>10%)", p_tightest > 0.10)
 check("widest level has low fill rate (<50%)", p_widest < 0.50)
 check("spread across levels > 5:1 ratio", p_tightest / p_widest > 5.0)
 
-# ════════════════════════════════════════════════════════════════════════════
 # TEST 4: simulate_fills — symmetric case
-# ════════════════════════════════════════════════════════════════════════════
 println("\n═══ TEST 4: simulate_fills — symmetric case ═══")
 
 # When V_believed = V_market, quotes are symmetric around market value
@@ -131,9 +117,7 @@ check("bid rate ≈ expected (within 2%)", abs(bid_rate - expected_rate) < 0.02)
 check("ask rate ≈ expected (within 2%)", abs(ask_rate - expected_rate) < 0.02)
 check("bid ≈ ask (symmetric)", abs(bid_rate - ask_rate) < 0.02)
 
-# ════════════════════════════════════════════════════════════════════════════
 # TEST 5: simulate_fills — asymmetric case (POMDP signal)
-# ════════════════════════════════════════════════════════════════════════════
 println("\n═══ TEST 5: simulate_fills — asymmetric case (POMDP signal) ═══")
 
 # Agent believes option is worth 4.50 but market thinks 4.30
@@ -177,9 +161,7 @@ p_ask_expected = fill_probability(δ_ask_analytical, A, k, Δt)
 check("simulated bid rate ≈ analytical (within 2%)", abs(bid_rate - p_bid_expected) < 0.02)
 check("simulated ask rate ≈ analytical (within 2%)", abs(ask_rate - p_ask_expected) < 0.02)
 
-# ════════════════════════════════════════════════════════════════════════════
 # TEST 6: FillOutcome struct stores correct data
-# ════════════════════════════════════════════════════════════════════════════
 println("\n═══ TEST 6: FillOutcome — data integrity ═══")
 
 rng = MersenneTwister(999)
@@ -192,9 +174,7 @@ check("V_market stored", outcome.V_market ≈ 4.50)
 check("bid_filled is Bool", outcome.bid_filled isa Bool)
 check("ask_filled is Bool", outcome.ask_filled isa Bool)
 
-# ════════════════════════════════════════════════════════════════════════════
 # TEST 7: fill_outcome_likelihood — consistency
-# ════════════════════════════════════════════════════════════════════════════
 println("\n═══ TEST 7: fill_outcome_likelihood ═══")
 
 # Create outcomes for all 4 possibilities and check likelihoods sum to 1
@@ -226,9 +206,7 @@ likelihood_high_vol = fill_outcome_likelihood(outcomes[2], 4.60, config)
 check("different V_market_j → different likelihoods", 
     !isapprox(likelihood_low_vol, likelihood_high_vol, atol=1e-6))
 
-# ════════════════════════════════════════════════════════════════════════════
 # TEST 8: Integration with Black-Scholes (end-to-end)
-# ════════════════════════════════════════════════════════════════════════════
 println("\n═══ TEST 8: Integration with Black-Scholes ═══")
 
 # Simulate what environment.jl will do: compute V_market and V_believed,
@@ -254,9 +232,7 @@ check("V_market > 0", V_market > 0.0)
 check("quotes bracket V_believed", quotes.bid_price < V_believed < quotes.ask_price)
 check("end-to-end runs without error", true)
 
-# ════════════════════════════════════════════════════════════════════════════
 # Summary
-# ════════════════════════════════════════════════════════════════════════════
 println("\n" * "═"^50)
 println("Results: $passed passed, $failed failed")
 println("═"^50)

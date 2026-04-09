@@ -141,8 +141,8 @@ result = bs_all(S, K, τ, σ, r; call=true)
 @printf("  Gamma: %.6f\n", result.Γ)
 @printf("  Vega:  %.4f\n", result.ν)
 
-check("ATM call price ≈ 3.99", isapprox(result.price, 3.99, atol=0.05))
-check("ATM call delta ≈ 0.5364", isapprox(result.Δ, 0.5364, atol=0.01))
+check("ATM call price ≈ 4.615", isapprox(result.price, 4.615, atol=0.05))
+check("ATM call delta ≈ 0.5695", isapprox(result.Δ, 0.5695, atol=0.01))
 check("Gamma > 0", result.Γ > 0.0)
 check("Vega > 0", result.ν > 0.0)
 

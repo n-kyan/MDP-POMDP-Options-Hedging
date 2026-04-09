@@ -1,6 +1,6 @@
 using Distributions: Normal, pdf, cdf
 
-const STD_NORMAL = Normal(1, 0)
+const STD_NORMAL = Normal(0, 1)
 
 function _d1_d2(
     S::Float64,
@@ -59,7 +59,7 @@ function bs_Δ_Γ(
         return (; Δ, Γ)
     end
     
-    d1, _ = _d1_d2(S, K, r, σ, τ)
+    d1, _ = _d1_d2(S, K, τ, σ, r)
 
     Δ = call ? cdf(STD_NORMAL, d1) : cdf(STD_NORMAL, d1) - 1.0
     Γ = pdf(STD_NORMAL, d1) / (S * σ * √τ)
@@ -109,7 +109,7 @@ function bs_all(
     end
     
     # Normal Case
-    d1, d2 = _d1_d2(S, K, r, σ, τ)
+    d1, d2 = _d1_d2(S, K, τ, σ, r)
     pdf_d1 = pdf(STD_NORMAL, d1)
     cdf_d1 = cdf(STD_NORMAL, d1)
 
