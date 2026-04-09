@@ -58,18 +58,24 @@ struct VolModel
     end
 end
 
-mutable struct VolState
+struct VolState
     vm::VolModel # stationary dist from VolModel
-    regime_idx::Int # initial regime needs to come from a random sample from the dist in VolModel. Varibel hold vol of current regime
+    regime_idx::Int # initial regime needs to come from a random sample from the dist in VolModel.
 
+    # Default constructor: sample from stationary distribution
     function VolState(vm::VolModel)
-        init_regime = sample(1:length(vm.σ_levels), Weights(vm.stationary_dist))
-        new(vm, init_regime)
+        regime_idx = sample(1:length(vm.σ_levels), Weights(vm.stationary_dist))
+        new(vm, regime_idx)
+    end
+
+    # Explicit constructor: used when transitioning to a known regime
+    function VolState(vm::VolModel, regime_idx::Int)
+        new(vm, regime_idx)
     end
 end
 
 # get helper to make code more readable
-get_σ(vm::VolModel, vs::VolState) = vm.σ_levels[vs.regime_idx]
+get_σ(vs::VolState) = vs.vm.σ_levels[vs.regime_idx]
 
 struct OptionContract
     K::Float64
@@ -139,6 +145,6 @@ mutable struct EnvironmentState
 end
 
 # Returns beliefs if you had perfect knowledge. Used by the market to calc true options value
-function compute_perfect_belief(vs::VolState)
+function market_regime_belief(vs::VolState)
     return vs.vm.transition_matrix[vs.regime_idx, :]
 end

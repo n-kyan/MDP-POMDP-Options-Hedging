@@ -1,7 +1,5 @@
 using Random
 
-include("1_types.jl")
-
 # Record of what happended at each timestep
 struct FillOutcome
     bid_filled::Bool
@@ -102,4 +100,19 @@ The four possible outcomes and their probabilities:
 
 Used in the Hamilton Filter
 =#
+function fill_outcome_likelihood(
+    fill::FillOutcome,
+    bid_price::Float64,
+    ask_price::Float64,
+    V_market_i::Float64,
+    config::SimConfig
+)
+    probs = fill_probability_for_regime(bid_price, ask_price, V_market_i, config)
+    p_bid, p_ask = probs.p_bid, probs.p_ask
 
+    # Joint probability of the exact observed outcome
+    p_bid_outcome = fill.bid_filled  ? p_bid  : (1.0 - p_bid)
+    p_ask_outcome = fill.ask_filled  ? p_ask  : (1.0 - p_ask)
+
+    return p_bid_outcome * p_ask_outcome  # independent Bernoulli
+end
