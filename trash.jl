@@ -1,262 +1,205 @@
-# ============================================================================
-# test_4_fills.jl — Tests for the fill model
-# ============================================================================
-# Run with: julia test_4_fills.jl
-# ============================================================================
+using Random
+using StatsBase: sample, Weights
 
-include("../src/1_types.jl")
-include("../src/2_black_scholes.jl")
-include("../src/4_fills.jl")
+# ────────────────────────────────────────────────────────────────────────────
+# Volatility Model + State (unchanged from current)
+# ────────────────────────────────────────────────────────────────────────────
 
-using Printf
-using Statistics
+struct VolModel
+    σ_levels::Vector{Float64}
+    transition_matrix::Matrix{Float64}
+    stationary_dist::Vector{Float64}
 
-passed = 0
-failed = 0
+    function VolModel(
+        σ_levels::Vector{Float64};
+        transition_matrix::Matrix{Float64} = ones(1, 1),
+    )
+        n = length(σ_levels)
 
-function check(name::String, condition::Bool)
-    global passed, failed
-    if condition
-        passed += 1
-        println("  ✓ $name")
-    else
-        failed += 1
-        println("  ✗ FAIL: $name")
+        # Validations
+        all(σ .> 0.0 for σ in σ_levels) || error(
+            "All σ_levels must be positive, got $σ_levels"
+        )
+        size(transition_matrix) == (n, n) || error(
+            "Transition matrix must be $(n)×$(n), got $(size(transition_matrix))"
+        )
+        all(transition_matrix .>= 0.0) || error(
+            "Transition matrix entries must be non-negative"
+        )
+        for i in 1:n
+            row_sum = sum(transition_matrix[i, :])
+            isapprox(row_sum, 1.0; atol=1e-9) || error(
+               "Row $i of transition matrix sums to $(sum(transition_matrix[i, :])), not 1.0"
+            )
+        end
+
+        if n == 1
+            π = [1.0]
+        elseif n == 2
+            p1_1 = transition_matrix[1, 1]
+            p2_2 = transition_matrix[2, 2]
+            p1_2 = 1.0 - p1_1
+            p2_1 = 1.0 - p2_2
+            denominator = p1_2 + p2_1
+            if denominator ≈ 0.0
+                π = [0.5, 0.5]
+            else
+                π = [p2_1/denominator, p1_2/denominator]
+            end
+        else
+            error("3+ regimes not yet implemented in VolModel for this project. Use 1-2 regimes.")
+        end
+        new(σ_levels, transition_matrix, π,)
     end
 end
 
-config = SimConfig()  # A=140, k=6, Δt=1/252
+mutable struct VolState
+    vm::VolModel
+    regime_idx::Int
 
-# ════════════════════════════════════════════════════════════════════════════
-# TEST 1: compute_quotes — basic symmetry
-# ════════════════════════════════════════════════════════════════════════════
-println("\n═══ TEST 1: compute_quotes ═══")
-
-V_believed = 4.50
-half_spread = 0.20
-quotes = compute_quotes(V_believed, half_spread)
-
-check("bid = V - δ", quotes.bid_price ≈ 4.30)
-check("ask = V + δ", quotes.ask_price ≈ 4.70)
-check("spread = 2δ", (quotes.ask_price - quotes.bid_price) ≈ 0.40)
-
-# Different spread levels
-for (i, δ) in enumerate(config.spread_levels)
-    q = compute_quotes(4.50, δ)
-    check("spread level $i: spread = $(2δ)", (q.ask_price - q.bid_price) ≈ 2δ)
+    function VolState(vm::VolModel)
+        init_regime = sample(1:length(vm.σ_levels), Weights(vm.stationary_dist))
+        new(vm, init_regime)
+    end
 end
 
-# ════════════════════════════════════════════════════════════════════════════
-# TEST 2: fill_probability — basic properties
-# ════════════════════════════════════════════════════════════════════════════
-println("\n═══ TEST 2: fill_probability — basic properties ═══")
+get_σ(vm::VolModel, vs::VolState) = vm.σ_levels[vs.regime_idx]
 
-A, k, Δt = config.A, config.k, config.Δt
 
-# At δ=0 (quoting exactly at market value), probability = min(1, A·Δt)
-p_at_market = fill_probability(0.0, A, k, Δt)
-@printf("  P(fill | δ=0.00) = %.4f  (= min(1, A·Δt) = min(1, %.4f))\n", p_at_market, A * Δt)
-check("δ=0: P = min(1, A·Δt)", p_at_market ≈ min(1.0, A * Δt))
+# ────────────────────────────────────────────────────────────────────────────
+# Option Contract
+# ────────────────────────────────────────────────────────────────────────────
 
-# Monotonically decreasing with δ
-p_tight  = fill_probability(0.05, A, k, Δt)
-p_medium = fill_probability(0.20, A, k, Δt)
-p_wide   = fill_probability(0.80, A, k, Δt)
-
-@printf("  P(fill | δ=0.05) = %.4f\n", p_tight)
-@printf("  P(fill | δ=0.20) = %.4f\n", p_medium)
-@printf("  P(fill | δ=0.80) = %.4f\n", p_wide)
-
-check("tighter spread → higher fill prob", p_tight > p_medium > p_wide)
-check("all probabilities in [0, 1]", 0.0 ≤ p_wide && p_tight ≤ 1.0)
-
-# Negative δ (quoting better than market) should clamp to δ=0
-p_negative = fill_probability(-0.10, A, k, Δt)
-check("negative δ clamps to δ=0", p_negative ≈ p_at_market)
-
-# Very wide spread → probability near 0
-p_very_wide = fill_probability(5.0, A, k, Δt)
-check("very wide spread → P ≈ 0", p_very_wide < 0.01)
-
-# ════════════════════════════════════════════════════════════════════════════
-# TEST 3: fill_probability — across all 5 spread levels
-# ════════════════════════════════════════════════════════════════════════════
-println("\n═══ TEST 3: fill_probability — spread level calibration ═══")
-
-println("  Spread level fill probabilities (per side, per step):")
-for (i, δ) in enumerate(config.spread_levels)
-    p = fill_probability(δ, A, k, Δt)
-    @printf("    Level %d: δ=\$%.2f → P(fill) = %.4f (%.1f%%)\n", i, δ, p, p * 100)
+struct OptionContract
+    K::Float64
+    is_call::Bool
 end
 
-# Check that the range spans from meaningful to rare
-p_tightest = fill_probability(config.spread_levels[1], A, k, Δt)
-p_widest   = fill_probability(config.spread_levels[end], A, k, Δt)
-check("tightest level has meaningful fill rate (>10%)", p_tightest > 0.10)
-check("widest level has low fill rate (<50%)", p_widest < 0.50)
-check("spread across levels > 5:1 ratio", p_tightest / p_widest > 5.0)
 
-# ════════════════════════════════════════════════════════════════════════════
-# TEST 4: simulate_fills — symmetric case
-# ════════════════════════════════════════════════════════════════════════════
-println("\n═══ TEST 4: simulate_fills — symmetric case ═══")
+# ────────────────────────────────────────────────────────────────────────────
+# Simulation Configuration
+# ────────────────────────────────────────────────────────────────────────────
 
-# When V_believed = V_market, quotes are symmetric around market value
-# so bid and ask fill rates should be approximately equal
-V_market = 4.50
-V_believed = 4.50  # same as market (Level 1 / constant vol)
-half_spread = 0.10
+Base.@kwdef struct SimConfig
+    # --- Market parameters ---
+    S0::Float64 = 100.0              # initial spot price
+    r::Float64 = 0.05                # risk-free rate (annualized)
+    Δt::Float64 = 1/252              # timestep in years (1 trading day)
 
-rng = MersenneTwister(42)
-n_trials = 50_000
-bid_count = 0
-ask_count = 0
+    # --- Option parameters ---
+    T_option::Int = 63               # trading days per option lifetime
+    n_options_per_episode::Int = 8    # sequential options per training episode
 
-for _ in 1:n_trials
-    quotes = compute_quotes(V_believed, half_spread)
-    outcome = simulate_fills(quotes.bid_price, quotes.ask_price, V_market, config, rng)
-    bid_count += outcome.bid_filled
-    ask_count += outcome.ask_filled
+    # --- Transaction costs ---
+    κ::Float64 = 0.001               # proportional cost (10 bps)
+
+    # --- Fill model (AS 2008) ---
+    A::Float64 = 140.0               # fill intensity  
+    k::Float64 = 6.0                 # fill decay rate (calibrated for options)
+
+    # --- Reward ---
+    φ::Float64 = 0.01                # risk aversion (inventory penalty weight)
+
+    # --- Action space ---
+    spread_levels::Vector{Float64} = [0.05, 0.10, 0.20, 0.40, 0.80]
+    hedge_targets::Vector{Float64} = [0.0, 0.25, 0.50, 0.75, 1.0, 1.25]
 end
 
-bid_rate = bid_count / n_trials
-ask_rate = ask_count / n_trials
-@printf("  Symmetric case: bid rate = %.4f, ask rate = %.4f\n", bid_rate, ask_rate)
+# Total number of discrete actions (spread levels × hedge targets).
+n_actions(config::SimConfig) = length(config.spread_levels) * length(config.hedge_targets)
 
-# Expected: both should be close to fill_probability(0.10, A, k, Δt)
-expected_rate = fill_probability(half_spread, A, k, Δt)
-@printf("  Expected rate (analytical): %.4f\n", expected_rate)
 
-check("bid rate ≈ expected (within 2%)", abs(bid_rate - expected_rate) < 0.02)
-check("ask rate ≈ expected (within 2%)", abs(ask_rate - expected_rate) < 0.02)
-check("bid ≈ ask (symmetric)", abs(bid_rate - ask_rate) < 0.02)
+# ────────────────────────────────────────────────────────────────────────────
+# Market-Making Action
+# ────────────────────────────────────────────────────────────────────────────
 
-# ════════════════════════════════════════════════════════════════════════════
-# TEST 5: simulate_fills — asymmetric case (POMDP signal)
-# ════════════════════════════════════════════════════════════════════════════
-println("\n═══ TEST 5: simulate_fills — asymmetric case (POMDP signal) ═══")
-
-# Agent believes option is worth 4.50 but market thinks 4.30
-# Agent's ask at 4.60 is only 0.30 above V_market → fills more often
-# Agent's bid at 4.40 is only 0.10 below V_market → also fills, but differently
-V_believed_agent = 4.50
-V_market_shifted = 4.30  # market thinks it's worth less
-half_spread = 0.10
-
-rng = MersenneTwister(123)
-bid_count = 0
-ask_count = 0
-
-for _ in 1:n_trials
-    quotes = compute_quotes(V_believed_agent, half_spread)
-    outcome = simulate_fills(quotes.bid_price, quotes.ask_price, V_market_shifted, config, rng)
-    bid_count += outcome.bid_filled
-    ask_count += outcome.ask_filled
+struct MarketMakingAction
+    spread_idx::Int
+    hedge_idx::Int
 end
 
-bid_rate = bid_count / n_trials
-ask_rate = ask_count / n_trials
-@printf("  Asymmetric case: bid rate = %.4f, ask rate = %.4f\n", bid_rate, ask_rate)
+function action_from_index(i::Int, config::SimConfig)
+    n_hedge = length(config.hedge_targets)
+    spread_idx = div(i - 1, n_hedge) + 1
+    hedge_idx = mod(i - 1, n_hedge) + 1
+    return MarketMakingAction(spread_idx, hedge_idx)
+end
 
-# Agent bid is at 4.40, V_market is 4.30
-# δ_bid = V_market - bid = 4.30 - 4.40 = -0.10 → clamps to 0 → high fill rate
-# Agent ask is at 4.60, V_market is 4.30  
-# δ_ask = ask - V_market = 4.60 - 4.30 = 0.30 → lower fill rate
-# So bid should fill MORE than ask when agent overvalues relative to market
-check("bid fills more when agent overvalues", bid_rate > ask_rate)
+function action_to_index(a::MarketMakingAction, config::SimConfig)
+    n_hedge = length(config.hedge_targets)
+    return (a.spread_idx - 1) * n_hedge + a.hedge_idx
+end
 
-# Verify the direction of the expected analytical values
-δ_bid_analytical = V_market_shifted - (V_believed_agent - half_spread)  # 4.30 - 4.40 = -0.10
-δ_ask_analytical = (V_believed_agent + half_spread) - V_market_shifted  # 4.60 - 4.30 = 0.30
-@printf("  δ_bid = %.2f (clamped to 0), δ_ask = %.2f\n", δ_bid_analytical, δ_ask_analytical)
 
-p_bid_expected = fill_probability(δ_bid_analytical, A, k, Δt)
-p_ask_expected = fill_probability(δ_ask_analytical, A, k, Δt)
-@printf("  Expected: P(bid) = %.4f, P(ask) = %.4f\n", p_bid_expected, p_ask_expected)
+# ────────────────────────────────────────────────────────────────────────────
+# State Representations
+# ────────────────────────────────────────────────────────────────────────────
 
-check("simulated bid rate ≈ analytical (within 2%)", abs(bid_rate - p_bid_expected) < 0.02)
-check("simulated ask rate ≈ analytical (within 2%)", abs(ask_rate - p_ask_expected) < 0.02)
+#=
+HedgingState — what the agent observes.
 
-# ════════════════════════════════════════════════════════════════════════════
-# TEST 6: FillOutcome struct stores correct data
-# ════════════════════════════════════════════════════════════════════════════
-println("\n═══ TEST 6: FillOutcome — data integrity ═══")
+The `regime_belief` field has different meanings at each level:
+  - Level 1: single element [1.0] (constant vol, no uncertainty)
+  - Level 2: one-hot at true regime, e.g. [1.0, 0.0] (agent knows regime)
+  - Level 3: probability distribution over regimes, updated by Hamilton 
+    filter using returns + fill asymmetry. This is the agent's imperfect 
+    estimate of where the market is pricing.
+=#
+struct HedgingState
+    S::Float64
+    τ::Float64
+    q_calls::Int
+    q_puts::Int
+    q_spot::Int
+    cash::Float64
+    regime_belief::Vector{Float64}
+end
 
-rng = MersenneTwister(999)
-quotes = compute_quotes(4.50, 0.20)
-outcome = simulate_fills(quotes.bid_price, quotes.ask_price, 4.50, config, rng)
+#=
+EnvironmentState — the full simulation state including hidden information.
 
-check("bid_price stored", outcome.bid_price ≈ 4.30)
-check("ask_price stored", outcome.ask_price ≈ 4.70)
-check("V_market stored", outcome.V_market ≈ 4.50)
-check("bid_filled is Bool", outcome.bid_filled isa Bool)
-check("ask_filled is Bool", outcome.ask_filled isa Bool)
+The market has perfect knowledge of the current regime. V_market is computed
+by environment.jl using the true regime and transition probabilities:
 
-# ════════════════════════════════════════════════════════════════════════════
-# TEST 7: fill_outcome_likelihood — consistency
-# ════════════════════════════════════════════════════════════════════════════
-println("\n═══ TEST 7: fill_outcome_likelihood ═══")
+    V_market = Σⱼ P(regime_next = j | regime_current = i) × V_BS(σⱼ)
 
-# Create outcomes for all 4 possibilities and check likelihoods sum to 1
-bid_price = 4.30
-ask_price = 4.70
-V_mkt = 4.50
+This is the transition-row-weighted BS price, which is the correct 
+one-step-ahead expected value for a market participant with perfect 
+regime knowledge. The market and "God" are the same entity in our model.
 
-outcomes = [
-    FillOutcome(false, false, bid_price, ask_price, V_mkt),  # no fill
-    FillOutcome(true,  false, bid_price, ask_price, V_mkt),  # bid only
-    FillOutcome(false, true,  bid_price, ask_price, V_mkt),  # ask only
-    FillOutcome(true,  true,  bid_price, ask_price, V_mkt),  # both
-]
+The agent does NOT see vol_state directly. In Level 3, the agent must 
+infer V_market from the fill asymmetry pattern — fills are computed 
+against V_market, so when the agent's V_believed diverges from V_market,
+fills become asymmetric, nudging the agent's belief toward the market's
+pricing.
 
-likelihoods = [fill_outcome_likelihood(o, V_mkt, config) for o in outcomes]
-total = sum(likelihoods)
+No market_belief field is needed since the market has perfect knowledge.
+No inventory limit Q — inventory risk is managed via the reward penalty 
+φ·Δ_net², following our decision to remove hard AS-style inventory bounds.
+=#
+mutable struct EnvironmentState
+    agent_state::HedgingState
+    vol_state::VolState
+    current_options::Vector{OptionContract}
+    options_completed::Int
+end
 
-@printf("  Likelihoods: no=%.4f, bid=%.4f, ask=%.4f, both=%.4f\n",
-    likelihoods[1], likelihoods[2], likelihoods[3], likelihoods[4])
-@printf("  Sum = %.6f\n", total)
 
-check("likelihoods sum to 1", isapprox(total, 1.0, atol=1e-10))
-check("all likelihoods ≥ 0", all(l -> l >= 0.0, likelihoods))
+# ────────────────────────────────────────────────────────────────────────────
+# V_market computation helper
+# ────────────────────────────────────────────────────────────────────────────
 
-# With V_market_j different from the stored V_market, likelihoods change
-# (this is how the belief updater distinguishes regimes)
-likelihood_low_vol  = fill_outcome_likelihood(outcomes[2], 4.40, config)
-likelihood_high_vol = fill_outcome_likelihood(outcomes[2], 4.60, config)
-check("different V_market_j → different likelihoods", 
-    !isapprox(likelihood_low_vol, likelihood_high_vol, atol=1e-6))
+#=
+compute_market_belief(vs::VolState) → Vector{Float64}
 
-# ════════════════════════════════════════════════════════════════════════════
-# TEST 8: Integration with Black-Scholes (end-to-end)
-# ════════════════════════════════════════════════════════════════════════════
-println("\n═══ TEST 8: Integration with Black-Scholes ═══")
+Returns the probability distribution over regimes that the market uses 
+for pricing. Since the market has perfect regime knowledge, this is 
+simply the current regime's row of the transition matrix — reflecting 
+that the market knows the current regime and accounts for the possibility 
+of transitioning next step.
 
-# Simulate what environment.jl will do: compute V_market and V_believed,
-# then feed them to the fill model
-S, K, τ, r = 100.0, 100.0, 0.25, 0.05
-σ_regimes = [0.121, 0.269]
-market_belief = [0.55, 0.45]  # stationary dist
-agent_belief  = [0.55, 0.45]  # same in Level 1
-
-V_market  = bs_all_belief_weighted(S, K, τ, σ_regimes, market_belief, r).price
-V_believed = bs_all_belief_weighted(S, K, τ, σ_regimes, agent_belief, r).price
-
-@printf("  V_market  = %.4f\n", V_market)
-@printf("  V_believed = %.4f\n", V_believed)
-
-quotes = compute_quotes(V_believed, config.spread_levels[2])  # level 2 = $0.10
-outcome = simulate_fills(quotes.bid_price, quotes.ask_price, V_market, config, MersenneTwister(42))
-
-@printf("  Quotes: bid=%.4f, ask=%.4f\n", quotes.bid_price, quotes.ask_price)
-@printf("  Fill result: bid=%s, ask=%s\n", outcome.bid_filled, outcome.ask_filled)
-
-check("V_market > 0", V_market > 0.0)
-check("quotes bracket V_believed", quotes.bid_price < V_believed < quotes.ask_price)
-check("end-to-end runs without error", true)
-
-# ════════════════════════════════════════════════════════════════════════════
-# Summary
-# ════════════════════════════════════════════════════════════════════════════
-println("\n" * "═"^50)
-println("Results: $passed passed, $failed failed")
-println("═"^50)
+This is used by environment.jl to compute V_market via bs_all_belief_weighted.
+=#
+function compute_market_belief(vs::VolState)
+    return vs.vm.transition_matrix[vs.regime_idx, :]
+end

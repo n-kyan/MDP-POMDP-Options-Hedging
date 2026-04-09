@@ -62,15 +62,13 @@ mutable struct VolState
     vm::VolModel # stationary dist from VolModel
     regime_idx::Int # initial regime needs to come from a random sample from the dist in VolModel. Varibel hold vol of current regime
 
-    function VolState(
-        vm::VolModel
-    )
+    function VolState(vm::VolModel)
         init_regime = sample(1:length(vm.σ_levels), Weights(vm.stationary_dist))
-
         new(vm, init_regime)
     end
 end
 
+# get helper to make code more readable
 get_σ(vm::VolModel, vs::VolState) = vm.σ_levels[vs.regime_idx]
 
 struct OptionContract
@@ -96,10 +94,7 @@ Base.@kwdef struct SimConfig
     k::Float64 = 6.0                 # fill decay rate (calibrated for options)
 
     # --- Reward ---
-    φ::Float64 = 0.01                # risk aversion (inventory penalty weight)
-
-    # --- Inventory limits ---
-    Q::Int = 10                      # max inventory per side
+    φ::Float64 = 0.01                # risk aversion (delta penalty weight)
 
     # --- Action space ---
     spread_levels::Vector{Float64} = [0.05, 0.10, 0.20, 0.40, 0.80]
@@ -130,9 +125,8 @@ end
 struct HedgingState # Agents observable states
     S::Float64
     τ::Float64
-    q_calls::Int
-    q_puts::Int
-    q_spot::Int # current quantity of spot assets
+    net_Δ::Float64 # portfolio Δ
+    net_Γ::Float64 # portfolio Γ
     cash::Float64
     regime_belief::Vector{Float64} # Vector of beliefs of what is current regime
 end
@@ -140,7 +134,11 @@ end
 mutable struct EnvironmentState
     agent_state::HedgingState            # the agent's observable state
     vol_state::VolState                  # true regime (hidden in Level 3)
-    market_belief::Vector{Float64}       # market's returns-only filter
-    current_options::Vector{OptionContract}       # the options currently being traded. Will start with calls and put of the same expiry and strike
+    current_options::Vector{OptionContract}       # the options currently being traded. Will start with calls only and add puts of the same expiry and strike later
     options_completed::Int               # count of expired options this episode
+end
+
+# Returns beliefs if you had perfect knowledge. Used by the market to calc true options value
+function compute_perfect_belief(vs::VolState)
+    return vs.vm.transition_matrix[vs.regime_idx, :]
 end

@@ -1,8 +1,6 @@
-using Random
-using StatsBase: sample, Weights
 include("1_types.jl")
 
-function step(
+function step_spot(
     S::Float64,
     vs::VolState,
     config::SimConfig,

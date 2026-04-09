@@ -8,13 +8,44 @@ The two deadlines drive the priority ordering. April 17 (derivatives paper) requ
 
 ---
 
+## Market Model: Perfect-Knowledge Market
+
+The market (the aggregate of all participants) has **perfect knowledge** of the current volatility regime and transition probabilities. This reflects the reality that the aggregate market incorporates far more information than any single market maker and is the best available estimator of fair value.
+
+The market computes its consensus option price as:
+
+$$V_{\text{market}} = \sum_j P(\text{regime}_{t+1} = j \mid \text{regime}_t = i) \times V_{\text{BS}}(\sigma_j)$$
+
+where $i$ is the current (true) regime. This is the transition-row-weighted BS price — the correct one-step-ahead expected value given perfect regime knowledge and awareness of possible transitions. In practice, with daily transition probabilities >99.7% on the diagonal, this is very close to $V_{\text{BS}}(\sigma_{\text{true}})$ but is more intellectually defensible.
+
+The **market and "God" (the simulator) are the same entity.** No separate market belief filter is needed. `environment.jl` computes $V_{\text{market}}$ directly from `vol_state.regime_idx` and the transition matrix via `compute_market_belief(vol_state)`.
+
+The agent's goal is **not** to outsmart the market about fair value — it is to track where the market is pricing, earn the bid-ask spread, and manage the risk of accumulated inventory through hedging. The agent makes money from providing liquidity, not from making better directional bets than the market.
+
+### Information Hierarchy
+
+| Entity | Knows | Computes V from |
+|---|---|---|
+| Market (= God) | True regime + transition matrix | Transition-weighted BS (perfect) |
+| Agent (Level 1) | σ is constant and known | V_BS(σ) directly (no uncertainty) |
+| Agent (Level 2) | True regime + transition matrix | Same as market (symmetric fills, pure spread/hedge optimization) |
+| Agent (Level 3) | Returns + fill outcomes only | Hamilton filter belief-weighted BS (imperfect, converging toward market) |
+
+### Inventory Management
+
+We remove the hard inventory bounds (max Q per side) from the original AS formulation. Instead, inventory risk is managed through the soft penalty $\phi \cdot \Delta_{\text{net}}^2$ in the reward function. This is more flexible than hard limits: the agent learns its own risk tolerance rather than having it imposed. AS required bounded inventory for their closed-form analytical solution; since we're solving with RL, we don't need that constraint. This is noted as a deliberate departure from AS in the paper.
+
+---
+
 ## Module Inventory
 
 ### Module 1: Types and Configuration — `types.jl`
 
-**From scratch.** Defines all shared data structures: `OptionContract` (strike K, option type), `HedgingState` (spot S, tau, inventory q, hedge_shares, cash, regime/belief), `EnvironmentState` (extends HedgingState with `market_belief::Vector{Float64}` — the market's returns-only Hamilton filter state; internal to the environment and never passed to the agent as an observation), `MarketMakingAction` (spread_level 1-5, hedge_target 1-6), and `SimConfig` (all simulation parameters including S0, K, r, κ, σ_regimes, transition_matrix, spread_levels, hedge_targets, A, k, φ, Δt, max_inventory Q, n_options_per_episode).
+**From scratch.** Defines all shared data structures: `OptionContract` (strike K, option type), `HedgingState` (spot S, tau, inventory q_calls/q_puts, hedge shares q_spot, cash, regime_belief), `EnvironmentState` (wraps HedgingState with vol_state, current_options, options_completed), `MarketMakingAction` (spread_idx 1-5, hedge_idx 1-6), `SimConfig` (all simulation parameters), and `compute_market_belief` (returns the transition matrix row for the current regime).
 
-The separation between `HedgingState` (the agent's view) and `EnvironmentState` (the full simulation state) enforces the information barrier. The agent never sees `market_belief` directly; it only experiences its consequences through fill outcomes.
+The separation between `HedgingState` (the agent's view) and `EnvironmentState` (the full simulation state) enforces the information barrier. The agent never sees `vol_state` directly in Level 3; it only experiences the market's pricing through fill outcomes.
+
+No `market_belief` field in EnvironmentState — the market has perfect knowledge, so its "belief" is computed on the fly from the true regime via `compute_market_belief(vol_state)`.
 
 **Dependencies:** None. **Target:** April 9.
 
@@ -22,21 +53,17 @@ The separation between `HedgingState` (the agent's view) and `EnvironmentState` 
 
 ### Module 2: Black-Scholes Pricing and Greeks — `black_scholes.jl`
 
-**From scratch.** Pure math functions: `bs_price`, `bs_delta`, `bs_gamma`, `bs_vega`, `bs_all` (returning a NamedTuple), internal helper `_d1_d2`. Guard clause returns intrinsic value and limit Greeks when τ ≤ 0 to prevent NaN propagation.
+**From scratch.** Pure math functions: `bs_price`, `bs_Δ_Γ`, `bs_ν`, `bs_all` (returning a NamedTuple with price, Δ, Γ, ν), internal helper `_d1_d2`. Guard clause returns intrinsic value and limit Greeks when τ ≤ 0.
 
-Belief-weighted pricing function: `bs_belief_weighted(S, K, τ, σ_regimes, belief, r, type)` computes the sum of belief_j × V_BS(σ_j) and similarly for Greeks.
+Belief-weighted pricing: `bs_all_belief_weighted(S, K, τ, σ_regimes, beliefs, r; call)` computes Σⱼ beliefs[j] × V_BS(σⱼ). Used for both V_market (beliefs = transition row from true regime) and V_believed (beliefs = agent's Hamilton filter output in Level 3).
 
-**Test suite:** Verify against known values — ATM call at S=K=100, σ=0.20, τ=0.25, r=0.05 should give price ≈ $3.99, delta ≈ 0.53.
-
-**Dependencies:** types.jl. **Target:** April 9.
+**Dependencies:** None (pure math). **Target:** April 9.
 
 ---
 
 ### Module 3: Spot Price Simulation — `spot_dynamics.jl`
 
-**From scratch.** Functions: `step_spot` (single GBM step with risk-neutral drift), `step_regime` (Markov chain transition using Hardy's daily transition matrix), `step_environment` (combined spot + regime step).
-
-Discretization: S_{t+1} = S_t × exp((r - σ²/2)Δt + σ√Δt × Z) where Z ~ N(0,1) and σ = σ_{current_regime}.
+**From scratch.** Single `step(S, vs, config, rng)` function that transitions the regime (Markov chain) and advances the spot price (GBM with risk-neutral drift). Returns `(S_new, log_return)`.
 
 **Dependencies:** types.jl. **Target:** April 9.
 
@@ -44,21 +71,32 @@ Discretization: S_{t+1} = S_t × exp((r - σ²/2)Δt + σ√Δt × Z) where Z ~ 
 
 ### Module 4: Fill Model — `fills.jl`
 
-**From scratch.** Implements AS (2008) eq. 2.11. Functions: `fill_probability(delta_from_market_value, A, k, Δt)` returning min(1, A·exp(-k·δ)·Δt), `simulate_fills(ask_price, bid_price, V_market, A, k, Δt, rng)` returning (bid_filled, ask_filled), and `compute_quotes(V_believed, spread_level, config)` returning (bid_price, ask_price).
+**From scratch.** Implements AS (2008) eq. 2.11.
 
-Fill probabilities use `V_market = bs_belief_weighted(S, K, τ, σ_regimes, market_belief, r, type)` — the market's belief-weighted BS price computed from the environment's returns-only Hamilton filter. This is distinct from `V_believed`, which uses the agent's belief. In Levels 1–2 (fully observable), both the agent and the market have the same information, so `V_believed ≈ V_market` and the distinction is moot. In Level 3, the agent's fill-augmented belief may diverge from the market's, producing the fill asymmetry that drives the POMDP observation signal.
+Functions:
+- `compute_quotes(V_believed, half_spread)` → `(; bid_price, ask_price)`
+- `fill_probability(δ, A, k, Δt)` → Float64 (core AS formula)
+- `simulate_fills(bid_price, ask_price, V_market, config, rng)` → `FillOutcome`
+- `fill_probability_for_regime(bid_price, ask_price, V_market_j, config)` → `(; p_bid, p_ask)`
+- `fill_outcome_likelihood(outcome, V_market_j, config)` → Float64
 
-`simulate_fills` takes `V_market` as an argument (not the current regime volatility). The caller — `environment.jl` — is responsible for computing `V_market` from the current `market_belief` before calling this function.
+`FillOutcome` struct stores bid_filled, ask_filled, bid_price, ask_price, V_market — a self-contained record for testing, visualization, and the belief updater.
 
-**Dependencies:** types.jl, black_scholes.jl. **Target:** April 10.
+Fill probabilities are computed against V_market (the market's perfect-knowledge price). The agent quotes around V_believed. When V_believed ≠ V_market (Level 3 only), fills become asymmetric — signaling to the agent that its pricing is off-center relative to the market.
+
+`fills.jl` is pure math — no inventory logic, no state mutation. `environment.jl` passes V_market and V_believed in.
+
+**Dependencies:** types.jl (for SimConfig, FillOutcome). **Target:** April 10.
 
 ---
 
 ### Module 5: Portfolio and P&L Accounting — `portfolio.jl`
 
-**From scratch.** Tracks inventory (held contracts with sign), aggregate Greeks, hedge shares, and cash. Computes per-step P&L from four sources: mark-to-market, spread capture, hedge P&L, and hedge transaction cost.
+**From scratch.** Tracks inventory, aggregate Greeks, hedge shares, and cash. Computes per-step P&L from four sources: mark-to-market, spread capture, hedge P&L, and hedge transaction cost.
 
-Key functions: `update_inventory!`, `execute_hedge!`, `compute_pnl`, `compute_reward` (implementing r = pnl - φ·Δ_net²), and `reset_for_new_option!` (carries cash forward when an option expires and a new one starts).
+Key functions: `update_inventory!`, `execute_hedge!`, `compute_pnl`, `compute_reward` (implementing r = pnl - φ·Δ_net²), and `reset_for_new_option!`.
+
+No hard inventory limits. The reward penalty φ·Δ_net² provides soft inventory management.
 
 **Dependencies:** types.jl, black_scholes.jl. **Target:** April 11.
 
@@ -66,22 +104,20 @@ Key functions: `update_inventory!`, `execute_hedge!`, `compute_pnl`, `compute_re
 
 ### Module 6: Environment Step Function — `environment.jl`
 
-**From scratch.** Wires modules 2–5 into a single `step!` function that executes the full timestep sequence:
+**From scratch.** Wires modules 2–5 into a single `step!` function:
 
-1. Compute agent's quotes from `V_believed` and chosen spread level
-2. Compute `V_market` from the current `market_belief` via `bs_belief_weighted`
-3. Execute hedge (shares traded to reach hedge target, charge transaction cost)
-4. Simulate fills using `V_market` (not the true regime vol)
-5. Update inventory and cash
-6. Step spot price and regime
-7. Recompute Greeks
-8. Update market belief via returns-only Hamilton filter step (`update_market_belief!`)
-9. Compute P&L and reward
-10. Check option expiry (if expired, settle and start new option; reset τ, carry cash forward)
+1. Compute V_believed from agent's `regime_belief` via `bs_all_belief_weighted`
+2. Compute quotes via `compute_quotes(V_believed, half_spread)`
+3. Compute V_market: `compute_market_belief(vol_state)` → `bs_all_belief_weighted`
+4. Execute hedge (trade shares to target, charge κ·|trade|·S)
+5. Simulate fills against V_market via `simulate_fills`
+6. Update inventory and cash
+7. Step spot price and regime via `step(S, vs, config, rng)`
+8. Recompute Greeks at new price
+9. Compute P&L and reward (r = pnl - φ·Δ_net²)
+10. Decrement τ; if expired, settle and start new option
 
-The market belief update (step 8) uses only the realized log return from step 6. The agent's belief update (if applicable in Level 3) is performed by the POMDP solver's belief updater in `belief_updater.jl`, not inside `environment.jl` — `environment.jl` only maintains `market_belief`. This keeps the information barrier clean: `environment.jl` manages ground truth and market state; the agent's inference is handled separately.
-
-Also implements `reset!` to initialize a new episode, setting both `market_belief` and (for POMDP) the agent's initial belief to the stationary distribution $(\pi_1, \pi_2)$.
+In Levels 1-2, V_believed = V_market (agent has same info as market), so fills are symmetric. In Level 3, V_believed may lag behind V_market after regime switches, creating asymmetric fills that help the agent track the market.
 
 **Dependencies:** All modules 1–5. **Target:** April 12.
 
@@ -89,13 +125,7 @@ Also implements `reset!` to initialize a new episode, setting both `market_belie
 
 ### Module 7: Analytical Benchmarks — `benchmarks.jl`
 
-**From scratch.** Implements all analytical benchmark strategies.
-
-Spread benchmarks: AS optimal spread (eq. 3.18), AS reservation price (eq. 3.17), and GLF-T asymptotic optimal depths (Proposition 3 closed-form approximation). The GLF-T formulas give inventory-dependent bid/ask depths that are bounded and more realistic than raw AS.
-
-Hedge benchmarks: Leland modified volatility (σ̂² = σ²(1 + √(2/π)·κ/(σ√Δt))), Leland delta (BS delta using σ̂), Whalley-Wilmott bandwidth (H = (3κSe^{-rτ}Γ²/(2γ))^{1/3}), and W-W hedge decision (trade to boundary if outside band).
-
-Includes a `run_benchmark` function that simulates any analytical strategy through the environment and collects P&L statistics for comparison.
+**From scratch.** Spread benchmarks: AS optimal spread, GLF-T asymptotic depths. Hedge benchmarks: Leland modified delta, Whalley-Wilmott bandwidth. Includes `run_benchmark` for simulation comparison.
 
 **Dependencies:** types.jl, black_scholes.jl, environment.jl. **Target:** April 13.
 
@@ -103,7 +133,7 @@ Includes a `run_benchmark` function that simulates any analytical strategy throu
 
 ### Module 8: Evaluation and Visualization — `evaluation.jl`
 
-**From scratch.** Functions: `evaluate_policy` (Monte Carlo evaluation), `compare_policies` (runs all policies on same random seeds), `plot_pnl_distributions` (histogram comparison like AS Figure 2), `plot_policy_surface` (learned spread/hedge as function of state), `plot_spread_vs_benchmark` (overlay learned vs. GLF-T), `compute_metrics` (mean, std, Sharpe, max drawdown, fill rates).
+**From scratch.** Monte Carlo evaluation, policy comparison, P&L distributions, policy surfaces, metrics computation.
 
 **Dependencies:** types.jl, environment.jl, benchmarks.jl. Uses Plots.jl. **Target:** April 14.
 
@@ -111,7 +141,7 @@ Includes a `run_benchmark` function that simulates any analytical strategy throu
 
 ### Module 9: Value Iteration Solver — `value_iteration.jl`
 
-**From scratch.** Tabular value iteration for the Level 1 discretized MDP. State discretization over ~2,000 states across (Δ_net, moneyness, τ, hedge_position). 30 discrete actions. Functions: `discretize_state`, `value_iteration` (standard Bellman backup with multiple samples per (s,a) for stochastic transitions), `extract_policy`.
+**From scratch.** Tabular VI for Level 1. ~2,000 states across (Δ_net, moneyness, τ, hedge_position). 30 actions.
 
 **Dependencies:** types.jl, environment.jl. **Target:** April 13.
 
@@ -119,35 +149,33 @@ Includes a `run_benchmark` function that simulates any analytical strategy throu
 
 ### Module 10: POMDPs.jl Interface — `pomdp_interface.jl`
 
-**From scratch** (interface code) + **POMDPs.jl** (solver infrastructure). Wraps the environment into POMDPs.jl abstract types implementing `gen`, `actions`, `discount`, etc. Enables DPWSolver (MCTS) and POMCPOW.
+**From scratch** (interface) + **POMDPs.jl** (solvers). Enables DPWSolver (MCTS) and POMCPOW.
 
-**Dependencies:** types.jl, environment.jl. Uses POMDPs.jl, QuickPOMDPs.jl. **Target:** April 18.
+**Dependencies:** types.jl, environment.jl. **Target:** April 18.
 
 ---
 
 ### Module 11: DQN Solver — `dqn.jl`
 
-**From scratch** using Flux.jl. Components: 3-layer MLP (state_dim → 128 → 128 → 30), replay buffer, ε-greedy exploration with linear decay, target network with periodic hard copy, training loop with minibatch TD updates.
+**From scratch** using Flux.jl. 3-layer MLP, replay buffer, ε-greedy, target network.
 
-**Dependencies:** types.jl, environment.jl. Uses Flux.jl. **Target:** April 20.
+**Dependencies:** types.jl, environment.jl. **Target:** April 20.
 
 ---
 
 ### Module 12: Belief Updater — `belief_updater.jl`
 
-**From scratch.** Implements both Hamilton (1989) filter variants.
+**From scratch.** Agent's Hamilton (1989) filter for Level 3 only.
 
-`update_agent_belief!(belief, log_return, fill_outcome, quotes, market_belief, config)`: Full four-step update using returns + fill likelihood. The fill likelihood for regime j is computed as P(fill_outcome | ρ = j, agent's quotes, V_market), where V_market is passed in so the fill likelihood correctly reflects how far the agent's quotes sat relative to the market price under each hypothetical regime. Returns updated belief vector.
+`update_agent_belief(belief, log_return, fill_outcome, config)`:
+1. **Predict:** ξ_predict = P' × ξ_prior
+2. **Return likelihood:** η_j = N(log_return | drift_j, σⱼ√Δt)
+3. **Fill likelihood:** ℓ_j = P(fill_outcome | regime = j) via `fill_outcome_likelihood`
+4. **Normalize:** ξ_agent = (ξ_predict ⊙ η ⊙ ℓ) / sum(...)
 
-`update_market_belief!(market_belief, log_return, config)`: Returns-only three-step update (predict → return likelihood → normalize). No fill likelihood step. This is called by `environment.jl` at every timestep. It represents the information state of a rational market participant who observes only public price data.
+The fill likelihood captures: "if the true regime were j, the market would price at V_market_j (transition-weighted BS from regime j), and the fill probabilities against my quotes would be different." This is how the agent infers where the market is pricing from its own fill patterns.
 
-Both functions are pure (no mutation of environment state) and return new belief vectors. The caller is responsible for storing the result.
-
-**Fill likelihood computation:** For a given fill outcome (e.g., ask filled, bid not filled), the probability under regime j is:
-
-$$P(\text{ask only} \mid \rho = j) = P_{\text{ask}}(\rho = j) \cdot (1 - P_{\text{bid}}(\rho = j))$$
-
-where each fill probability is computed from `fill_probability` in `fills.jl` using $V_{\text{market}} = \sum_i \xi_i^{\text{market}} V_{\text{BS}}(\sigma_i)$. Note that the fill likelihood depends on the *current* market belief (which determines V_market), creating a coupling between the two filters. This coupling is resolved by always computing V_market from the *prior* market belief (before the current step's return is incorporated) to avoid lookahead bias.
+No market filter needed — the market has perfect knowledge.
 
 **Dependencies:** types.jl, fills.jl, black_scholes.jl. **Target:** April 22.
 
@@ -155,7 +183,7 @@ where each fill probability is computed from `fill_probability` in `fills.jl` us
 
 ### Module 13: QMDP Solver — `qmdp.jl`
 
-**From scratch.** Solves the underlying MDP for each regime via value iteration, then selects actions by weighting Q-values with belief: a* = argmax_a Σ_j belief_j · Q_j(s,a).
+**From scratch.** Solve MDP per regime, weight Q-values by belief: a* = argmax_a Σ_j belief_j · Q_j(s,a).
 
 **Dependencies:** types.jl, value_iteration.jl, belief_updater.jl. **Target:** April 23.
 
@@ -164,39 +192,29 @@ where each fill probability is computed from `fill_probability` in `fills.jl` us
 ## Build Order and Deadline Mapping
 
 ### Phase 1: Core Environment — April 9 to 12
-
-Day 1 (Apr 9): types.jl, black_scholes.jl, spot_dynamics.jl. Day 2 (Apr 10): fills.jl + unit tests for all Day 1 modules. Day 3 (Apr 11): portfolio.jl + integration tests. Day 4 (Apr 12): environment.jl + end-to-end smoke test with random policy.
-
-**Milestone:** Can run step!(state, random_action, config, rng) in a loop and collect P&L.
+Day 1 (Apr 9): types.jl, black_scholes.jl, spot_dynamics.jl.
+Day 2 (Apr 10): fills.jl + unit tests.
+Day 3 (Apr 11): portfolio.jl + integration tests.
+Day 4 (Apr 12): environment.jl + end-to-end smoke test.
 
 ### Phase 2: Benchmarks + Value Iteration — April 13 to 14
-
-Day 5 (Apr 13): benchmarks.jl + value_iteration.jl. Day 6 (Apr 14): evaluation.jl + generate comparison plots.
-
-**Milestone:** Comparison table showing RL agent vs. AS, GLF-T, Leland, Whalley-Wilmott across 1,000 episodes.
+Day 5 (Apr 13): benchmarks.jl + value_iteration.jl.
+Day 6 (Apr 14): evaluation.jl + comparison plots.
 
 ### Phase 3: Derivatives Paper — April 15 to 17
-
-Day 7 (Apr 15): Write model description and literature review sections. Day 8 (Apr 16): Write results section from Phase 2 outputs and discussion. Day 9 (Apr 17): Final editing, submit.
+Days 7-9: Write and submit derivatives paper.
 
 ### Phase 4: Advanced Solvers — April 18 to 24
-
-Day 10 (Apr 18): pomdp_interface.jl + test with DPWSolver (MCTS). Day 11 (Apr 19): Run MCTS on Level 2, collect results. Day 12 (Apr 20): dqn.jl training loop + initial training runs. Day 13 (Apr 21): DQN hyperparameter tuning, Level 2 DQN results. Day 14 (Apr 22): belief_updater.jl (Hamilton filter). Day 15 (Apr 23): qmdp.jl + test POMCPOW on Level 3. Day 16 (Apr 24): Full evaluation — L1 vs L2 vs L3, cost-of-partial-observability analysis.
-
-**Milestone:** Complete results for all three levels.
+Days 10-16: MCTS, DQN, belief updater, QMDP, POMCPOW, full L1-L2-L3 evaluation.
 
 ### Phase 5: DMU Paper — April 25 to 30
-
-Days 17–19 (Apr 25–27): Write paper focusing on MDP formulation, solver comparison, POMDP analysis. Days 20–21 (Apr 28–29): Figures and editing. Day 22 (Apr 30): Submit.
+Days 17-22: Write and submit DMU paper.
 
 ---
 
 ## Risk Mitigation
 
-**If value iteration is too slow:** Reduce discretization granularity first, then switch to approximate methods.
-
-**If DQN doesn't converge:** Start with value iteration policy as behavioral cloning target, then fine-tune. Alternatively, report only MCTS results for Level 2.
-
-**If POMDP level is too complex:** Report QMDP only (skip POMCPOW). QMDP is fast because it reuses MDP value functions.
-
-**If sequential options cause boundary issues:** Simplify to a single long-dated option (1 year) for initial results.
+**If value iteration is too slow:** Reduce discretization first, then approximate methods.
+**If DQN doesn't converge:** Use VI policy as behavioral cloning target, or report MCTS only for Level 2.
+**If POMDP level is too complex:** Report QMDP only (skip POMCPOW).
+**If sequential options cause boundary issues:** Simplify to single long-dated option.
