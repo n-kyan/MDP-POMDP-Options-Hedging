@@ -1,3 +1,7 @@
+using Distributions: Normal, pdf, cdf
+
+const STD_NORMAL = Normal(1, 0)
+
 function _d1_d2(
     S::Float64,
     K::Float64,
@@ -19,11 +23,11 @@ function bs_price(
     r::Float64;
     call::Bool = true
 )
-    if τ < 1e-8
+    if τ ≈ 0
         return call ? max(S - K, 0.0) : max(K - S, 0.0)
     end
 
-    d1, d2 = _d1_d2(S, K, r, σ, τ)
+    d1, d2 = _d1_d2(S, K, τ, σ, r)
 
     if call
         return S * cdf(STD_NORMAL, d1) - K * exp(-r * τ) * cdf(STD_NORMAL, d2)
@@ -40,7 +44,7 @@ function bs_Δ_Γ(
     r::Float64;
     call::Bool = true
 )
-    if τ < 1e-8
+    if τ ≈ 0
         Γ = 0.0
 
         if S > K # itm call or otm put
@@ -52,7 +56,6 @@ function bs_Δ_Γ(
             # Mention epsilon buffer ("moneyness smoothing") as alt in paper TODO:
             Δ = call ? 0.5 : -0.5
         end
-
         return (; Δ, Γ)
     end
     
@@ -71,12 +74,11 @@ function bs_ν(
     σ::Float64,
     r::Float64;
 )
-    if τ < 1e-8
+    if τ ≈ 0
         return 0.0
     end
 
-    d1, _ = _d1_d2(S, K, r, σ, τ)
-
+    d1, _ = _d1_d2(S, K, τ, σ, r)
     return S * √τ * pdf(STD_NORMAL, d1)
 end
 
@@ -88,7 +90,7 @@ function bs_all(
     r::Float64;
     call::Bool = true
 )
-    if τ < 1e-8
+    if τ ≈ 0
         price = call ? max(S - K, 0.0) : max(K - S, 0.0)
         Γ = 0.0
         ν = 0.0
@@ -106,48 +108,66 @@ function bs_all(
         return (; price, Δ, Γ, ν)
     end
     
+    # Normal Case
     d1, d2 = _d1_d2(S, K, r, σ, τ)
+    pdf_d1 = pdf(STD_NORMAL, d1)
+    cdf_d1 = cdf(STD_NORMAL, d1)
 
     # Price
     if call
-        price =  S * cdf(STD_NORMAL, d1) - K * exp(-r * τ) * cdf(STD_NORMAL, d2)
+        price =  S * cdf_d1 - K * exp(-r * τ) * cdf(STD_NORMAL, d2)
     else
         price =  K * exp(-r * τ) * cdf(STD_NORMAL, -d2) - S * cdf(STD_NORMAL, -d1)
     end
 
     # Greeks
-    Δ = call ? cdf(STD_NORMAL, d1) : cdf(STD_NORMAL, d1) - 1.0
-    Γ = pdf(STD_NORMAL, d1) / (S * σ * √τ)
-    ν = S * √τ * pdf(STD_NORMAL, d1)
+    Δ = call ? cdf_d1 : cdf_d1 - 1.0
+    Γ = pdf_d1 / (S * σ * √τ)
+    ν = S * √τ * pdf_d1
 
     return (; price, Δ, Γ, ν)
 end
+
+#=
+Compute belief-weighted price and Greeks:
+    V = Σᵢ beliefs[i] × V_BS(σ_regimes[i])
+
+This is mathematically correct because BS pricing is nonlinear in σ
+(Jensen's inequality), so you must price per-regime and then average,
+not average σ and then price.
+
+Used by both the agent (beliefs = agent's belief) and the market
+(beliefs = market's returns-only filter belief).
+=#
 
 function bs_all_belief_weighted(
     S::Float64,
     K::Float64,
     τ::Float64,
     σ_regimes::Vector{Float64},
-    regime_beliefs::Vector{Float64}, # needs type - I assume its a Vector{Float64}
+    regime_beliefs::Vector{Float64},
     r::Float64;
     call::Bool = true
 )
-    length(σ_regimes) == length(regime_beliefs) || error("Length of σ_regimes ≠ regime_beliefs")
+    length(σ_regimes) == length(regime_beliefs) || error(
+        "σ_regimes has $(length(σ_regimes)) entries but beliefs has $(length(regime_beliefs))"
+        )
     
     n = length(σ_regimes)
     # Price
-    total_price::Float64 = 0
-    total_Δ::Float64 = 0
-    total_Γ::Float64 = 0
-    total_ν::Float64 = 0
-    for i in 1:n
-        bs = bs_all(S, K, τ, K, r, call) 
+    total_price = 0.0
+    total_Δ = 0.0
+    total_Γ = 0.0
+    total_ν = 0.0
 
-        total_price += regime_beliefs[i] * bs.price
-        total_Δ += regime_beliefs[i] * bs.Δ
-        total_Γ += regime_beliefs[i] * bs.Γ
-        total_ν += regime_beliefs[i] * bs.ν
+    for i in 1:n
+        bs_i = bs_all(S, K, τ, σ_regimes[i], r; call=call) 
+
+        total_price += regime_beliefs[i] * bs_i.price
+        total_Δ += regime_beliefs[i] * bs_i.Δ
+        total_Γ += regime_beliefs[i] * bs_i.Γ
+        total_ν += regime_beliefs[i] * bs_i.ν
     end
 
-    return (; total_price, total_Δ, total_Γ, total_ν)
+    return (price=total_price, Δ=total_Δ, Γ=total_Γ, ν=total_ν)
 end
