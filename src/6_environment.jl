@@ -103,7 +103,7 @@ function step_environment!(
 
     # 2. Look up actions in config from action struct
     half_spread    = config.spread_levels[action.spread_idx]
-    hedge_fraction = config.hedge_targets[action.hedge_idx]
+    target_Δ = config.Δ_targets[action.hedge_idx]
 
     # 3. Compute fair values for quoting and fills (only one option for now)
     opt        = env.current_options[1]
@@ -128,9 +128,14 @@ function step_environment!(
 
     # 8. Execute hedge against Δ_options
     # return variables not needed for execution logic but will be used for visualization and evaluation
-    shares_traded, hedge_cost = execute_hedge!(
-        portfolio, hedge_fraction, port_post_fills.Δ_options, S, config
-    )
+    if target_Δ == :no_trade
+        shares_traded = 0.0
+        hedge_cost = 0.0
+    else
+        shares_traded, hedge_cost = execute_hedge!(
+            portfolio, target_Δ, port_post_fills.Δ_options, S, config
+        )
+    end
 
     # 9. Step the spot market
     S_new, vs_new, log_return = step_spot(S, vs, config, rng)

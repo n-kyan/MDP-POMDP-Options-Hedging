@@ -1,6 +1,31 @@
 using Random
 using StatsBase: sample, Weights
 
+Base.@kwdef struct SimConfig
+    # --- Market parameters ---
+    S0::Float64 = 100.0              # initial spot price
+    r::Float64 = 0.05                # risk-free rate (annualized)
+    Δt::Float64 = 1/252              # timestep in years (1 trading day)
+
+    # --- Option parameters ---
+    T_option::Int = 63               # trading days per option lifetime
+    n_options_per_episode::Int = 8    # sequential options per training episode
+
+    # --- Transaction costs ---
+    κ::Float64 = 0.001               # proportional cost (10 bps)
+
+    # --- Fill model (AS 2008) ---
+    A::Float64 = 140.0               # fill intensity  
+    k::Float64 = 6.0                 # fill decay rate (calibrated for options)
+
+    # --- Reward ---
+    φ::Float64 = 0.01                # risk aversion (delta penalty weight)
+
+    # --- Action space ---
+    spread_levels::Vector{Float64} = [0.05, 0.10, 0.20, 0.40, 0.80]
+    Δ_targets::Vector{Float64} = [:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]
+end
+
 struct VolModel
     σ_levels::Vector{Float64}
     transition_matrix::Matrix{Float64}
@@ -80,31 +105,6 @@ get_σ(vs::VolState) = vs.vm.σ_levels[vs.regime_idx]
 struct OptionContract
     K::Float64
     is_call::Bool
-end
-
-Base.@kwdef struct SimConfig
-    # --- Market parameters ---
-    S0::Float64 = 100.0              # initial spot price
-    r::Float64 = 0.05                # risk-free rate (annualized)
-    Δt::Float64 = 1/252              # timestep in years (1 trading day)
-
-    # --- Option parameters ---
-    T_option::Int = 63               # trading days per option lifetime
-    n_options_per_episode::Int = 8    # sequential options per training episode
-
-    # --- Transaction costs ---
-    κ::Float64 = 0.001               # proportional cost (10 bps)
-
-    # --- Fill model (AS 2008) ---
-    A::Float64 = 140.0               # fill intensity  
-    k::Float64 = 6.0                 # fill decay rate (calibrated for options)
-
-    # --- Reward ---
-    φ::Float64 = 0.01                # risk aversion (delta penalty weight)
-
-    # --- Action space ---
-    spread_levels::Vector{Float64} = [0.05, 0.10, 0.20, 0.40, 0.80]
-    hedge_targets::Vector{Float64} = [0.0, 0.25, 0.50, 0.75, 1.0, 1.25]
 end
 
 # Total number of discrete actions (spread levels × hedge targets).

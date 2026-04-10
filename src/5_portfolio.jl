@@ -49,17 +49,16 @@ end
 
 function execute_hedge!(
     portfolio::Portfolio,
-    hedge_fraction::Float64,
+    target_Δ::Float64,
     Δ_options::Float64,
     S::Float64,
     config::SimConfig
 )
-    q_spot_target   = -(hedge_fraction * Δ_options)
-    shares_to_trade = q_spot_target - portfolio.q_spot
+    shares_to_trade = target_Δ - Δ_options
     hedge_cost      = config.κ * abs(shares_to_trade) * S
 
     portfolio.cash   -= shares_to_trade * S + hedge_cost
-    portfolio.q_spot  = q_spot_target
+    portfolio.q_spot  = portfolio.q_spot + shares_to_trade
 
     return shares_to_trade, hedge_cost
 end
@@ -84,7 +83,6 @@ function build_agent_state(
     regime_belief::Vector{Float64},
     σ_regimes::Vector{Float64},
     r::Float64,
-    Δt::Float64
 )
     port = compute_portfolio(portfolio, options, S, τ, σ_regimes, regime_belief, r)
     net_Δ = port.Δ_options + portfolio.q_spot
