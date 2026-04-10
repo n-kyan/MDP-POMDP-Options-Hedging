@@ -94,6 +94,7 @@ function bs_all(
         price = call ? max(S - K, 0.0) : max(K - S, 0.0)
         Γ = 0.0
         ν = 0.0
+        Θ = 0.0
 
         if S > K # itm call or otm put
             Δ = call ? 1.0 : 0.0
@@ -105,7 +106,7 @@ function bs_all(
             Δ = call ? 0.5 : -0.5
         end
 
-        return (; price, Δ, Γ, ν)
+        return (; price, Δ, Γ, ν, Θ)
     end
     
     # Normal Case
@@ -124,8 +125,19 @@ function bs_all(
     Δ = call ? cdf_d1 : cdf_d1 - 1.0
     Γ = pdf_d1 / (S * σ * √τ)
     ν = S * √τ * pdf_d1
+    # Theta
+    # Shared term
+    Θ_time = -(S * pdf_d1 * σ) / (2 * √τ)
+    # Interest rate term (sign flips between calls and puts)
+    Θ_rate = if call
+        -r * K * exp(-r * τ) * cdf(STD_NORMAL, d2)
+    else
+        +r * K * exp(-r * τ) * cdf(STD_NORMAL, -d2)
+    end
 
-    return (; price, Δ, Γ, ν)
+    Θ = (Θ_time + Θ_rate) / 252   # per-day theta
+
+    return (; price, Δ, Γ, ν, Θ)
 end
 
 #=
@@ -159,6 +171,7 @@ function bs_all_belief_weighted(
     total_Δ = 0.0
     total_Γ = 0.0
     total_ν = 0.0
+    total_Θ = 0.0
 
     for i in 1:n
         bs_i = bs_all(S, K, τ, σ_regimes[i], r; call=call) 
@@ -167,7 +180,8 @@ function bs_all_belief_weighted(
         total_Δ += regime_beliefs[i] * bs_i.Δ
         total_Γ += regime_beliefs[i] * bs_i.Γ
         total_ν += regime_beliefs[i] * bs_i.ν
+        total_Θ += regime_beliefs[i] * bs_i.Θ
     end
 
-    return (price=total_price, Δ=total_Δ, Γ=total_Γ, ν=total_ν)
+    return (price=total_price, Δ=total_Δ, Γ=total_Γ, ν=total_ν, Θ=total_Θ)
 end

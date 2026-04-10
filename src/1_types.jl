@@ -128,23 +128,43 @@ function action_to_index(a::MarketMakingAction, config::SimConfig)
     return (a.spread_idx - 1) * n_hedge + a.hedge_idx
 end
 
-struct HedgingState # Agents observable states
+struct AgentState # Agents observable states
     S::Float64
     τ::Float64
     net_Δ::Float64 # portfolio Δ
     net_Γ::Float64 # portfolio Γ
-    cash::Float64
+    net_ν::Float64 # portfolio ν
+    net_Θ::Float64 # portfolio Θ
     regime_belief::Vector{Float64} # Vector of beliefs of what is current regime
 end
 
 mutable struct EnvironmentState
-    agent_state::HedgingState            # the agent's observable state
+    agent_state::AgentState            # the agent's observable state
     vol_state::VolState                  # true regime (hidden in Level 3)
     current_options::Vector{OptionContract}       # the options currently being traded. Will start with calls only and add puts of the same expiry and strike later
     options_completed::Int               # count of expired options this episode
 end
 
 # Returns beliefs if you had perfect knowledge. Used by the market to calc true options value
-function market_regime_belief(vs::VolState)
+function perfect_regime_belief(vs::VolState)
     return vs.vm.transition_matrix[vs.regime_idx, :]
+end
+
+mutable struct Portfolio
+    option_quantities::Vector{Int} # length of 1 right now since only trading calls and a single strike and single expiry
+    q_spot::Float64
+    cash::Float64
+
+    function Portfolio() # Constructor for preallocated empty portfolio 
+        new(Int[], 0.0, 0.0)
+    end
+end
+
+struct StepInfo
+    log_return::Float64
+    fill::FillOutcome
+    shares_traded::Float64
+    hedge_cost::Float64
+    wealth_before::Float64
+    wealth_after::Float64
 end
