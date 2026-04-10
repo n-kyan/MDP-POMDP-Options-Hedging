@@ -40,13 +40,17 @@ $$V_{\text{market}} = \sum_j \xi_j^{\text{market}} \cdot V_{\text{BS}}(\sigma_j)
 
 Fill probabilities are computed against $V_{\text{market}}$, not against the true-regime price. The agent quotes around its own belief-weighted price $V_{\text{believed}}$. When the agent's belief diverges from the market's — for example, because a recent string of large returns has moved the market toward high-vol while the agent has not yet updated — the agent's quotes are mis-centered and fills become asymmetric. The four-component P&L decomposition follows.
 
-**3.3 Hedging mechanism.** Discrete hedge ratio targets. Proportional transaction costs on the underlying. The interaction between spread and hedge decisions.
+**3.3 Hedging mechanism.** Discrete absolute net-delta targets: `[:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]`. The agent picks a destination in net-delta space at each step; `execute_hedge!` trades the difference between target and current `net_Δ`, charging proportional transaction costs κ·|shares traded|·S. `:no_trade` incurs zero cost and is the action the Whalley-Wilmott benchmark uses when inside its no-trade band. Absolute targets were chosen over fractional targets because (a) `net_Δ` is observable in agent state while `Δ_options` in isolation is not, and (b) the agent's cost of each action is a direct function of its current `net_Δ`, which the agent observes. Range ±0.3 discourages directional speculation; step size 0.1 is a tunable parameter noted for future refinement.
 
 **3.4 Reward function.** Running delta penalty r = pnl - φ·Δ_net², adapted from CJP's (2015) inventory penalty. Justification via CARA equivalence under Gaussian returns.
 
 ### Section 4: Analytical Benchmarks (1 page)
 
-Present the three spread benchmarks (symmetric, AS, GLF-T) and three hedge benchmarks (naive BS delta, Leland, Whalley-Wilmott) with their exact formulas. Explain what each captures and what it misses. Note that all three spread benchmarks assume the market correctly prices at the current-regime vol — they serve as upper bounds on spread performance and a useful calibration target for Level 1, but are strictly misspecified for Levels 2 and 3.
+Present the three spread benchmarks (symmetric, AS, GLF-T) and three hedge benchmarks (naive BS delta, Leland, Whalley-Wilmott) with their exact formulas. Explain what each captures and what it misses. Note that all three spread benchmarks assume the market correctly prices at the current-regime vol — they serve as useful calibration targets for Level 1, but are strictly misspecified for Levels 2 and 3.
+
+**Key adaptation to state explicitly:** AS and GLF-T were derived for stocks, where the dealer holds inventory in shares. For options, the inventory risk term must use **dollar gamma** rather than raw volatility. The substitution is $\gamma\sigma^2\tau \rightarrow \gamma \cdot \Gamma S^2 \sigma^2 \cdot \tau$, because the P&L variance of an options position is driven by gamma (the rate of change of delta) rather than the stock's vol directly. This produces spread formulas that widen near-the-money and at short expiries — exactly the behavior real options market makers exhibit. This adaptation is a stated contribution of the paper.
+
+**Whalley-Wilmott no-trade band:** The half-bandwidth $H = \left(\frac{3\kappa}{2} \cdot \frac{\Gamma^2 S^2 \sigma^2}{\phi}\right)^{1/3} \cdot \Delta t^{1/3}$ defines a region around the current delta where rebalancing is suboptimal. For typical ATM parameters with our calibration, $H \approx 0.05$–$0.08$ net-delta units — smaller than the 0.1 step size in our action space, which motivates the `:no_trade` action as the primary mechanism for capturing this behavior.
 
 ### Section 5: Solution Method (0.5 pages)
 
@@ -78,7 +82,9 @@ Frame as: options market making is a natural application of DMU course content. 
 
 ### Section 2: Problem Formulation (1.5 pages)
 
-**2.1 MDP formulation.** State space (Δ_net, moneyness, τ, hedge position, regime), action space (5 spread × 6 hedge = 30 actions), transition dynamics (regime-switching GBM + fill model), reward function (pnl - φ·Δ_net²). Formal notation matching Kochenderfer's textbook.
+**2.1 MDP formulation.** State space (net_Δ, moneyness, τ, regime), action space (5 spread × 8 hedge = 40 actions), transition dynamics (regime-switching GBM + fill model), reward function (pnl - φ·Δ_net²). Formal notation matching Kochenderfer's textbook.
+
+Hedge actions are **absolute net-delta targets** `[:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]`. The agent picks a destination in net-delta space; `net_Δ` in the state tells it how expensive each target is to reach. `:no_trade` is the zero-cost action corresponding to the Whalley-Wilmott "inside the band" decision. This formulation was chosen over fractional hedging because: (1) `net_Δ` is directly observable while `Δ_options` alone is not; (2) absolute targets allow the agent to reason about transaction cost without needing to know the decomposition of `net_Δ` into its option and spot components.
 
 **2.2 POMDP extension.** Hidden state (volatility regime). Observation model: log return (magnitude is a public signal of regime) and fill outcome (a private signal — the market cannot observe the agent's fills).
 

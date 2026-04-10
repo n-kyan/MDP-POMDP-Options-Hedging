@@ -115,11 +115,17 @@ No hard inventory limits. The reward penalty manages inventory risk.
 
 ### Hedge Action Levels
 
-{0%, 25%, 50%, 75%, 100%, 125%} of current net delta exposure.
+Absolute net-delta targets: `[:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]`
+
+The agent picks a destination in net-delta space, not a fraction of its current exposure. `:no_trade` means hold the current hedge position unchanged (zero transaction cost). Numeric targets cause `execute_hedge!` to trade the difference between the target and `current_net_Δ`. Range ±0.3 covers intentional small tilts while discouraging directional speculation; can be widened in future work if needed.
+
+**Why absolute targets, not fractions:** The agent observes `net_Δ` (total portfolio delta) in its state, not `Δ_options` in isolation. Absolute targets map directly onto the observable: the agent sees where it is and picks where it wants to be. Fractions of `Δ_options` would require knowing `q_spot` separately (not in state) to reason about cost. Under absolute targets, `net_Δ` serves as the cost basis for each hedge decision — the same target from a large `net_Δ` requires a larger trade and incurs higher transaction costs, which the agent must learn to anticipate.
+
+**Note:** Step size of 0.1 and range ±0.3 are tunable parameters. Finer granularity near zero (where the Whalley-Wilmott no-trade band lives, ~±0.05–0.08) may improve performance in future iterations.
 
 ### Combined Action Space
 
-5 spread × 6 hedge = **30 discrete actions**.
+5 spread × 8 hedge = **40 discrete actions**.
 
 ---
 
@@ -131,10 +137,13 @@ No hard inventory limits. The reward penalty manages inventory risk.
 |---|---|
 | Spot price S | Current underlying price |
 | Time to expiry τ | Countdown to current option expiry |
-| Call inventory q_calls | Signed count of call contracts |
-| Spot inventory q_spot | Shares of underlying held for hedging |
-| Cash | Cumulative cash balance |
+| net_Δ | Combined portfolio delta: Δ_options + q_spot. Serves as both risk signal and cost basis for hedge decisions |
+| net_Γ | Portfolio gamma — drives hedge urgency and spread width |
+| net_ν | Portfolio vega — sensitivity to vol changes |
+| net_Θ | Portfolio theta — time decay |
 | Regime belief | Agent's belief over regimes (varies by level) |
+
+Note: `q_spot` and `Δ_options` are not separate state dimensions — `net_Δ` captures the relevant aggregate. Under absolute hedge targets, the agent needs to know where it is (net_Δ) to know how expensive each target is to reach, not how it got there.
 
 ### Reward Function
 

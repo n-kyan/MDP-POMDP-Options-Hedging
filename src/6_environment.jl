@@ -133,7 +133,7 @@ function step_environment!(
         hedge_cost = 0.0
     else
         shares_traded, hedge_cost = execute_hedge!(
-            portfolio, target_Δ, port_post_fills.Δ_options, S, config
+            portfolio, target_Δ, port_post_fills.Δ_net, S, config
         )
     end
 

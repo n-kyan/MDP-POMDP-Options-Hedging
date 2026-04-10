@@ -26,9 +26,10 @@ function compute_portfolio(
         Θ_net        += q * bs.Θ
     end
 
+    Δ_net = Δ_options + portfolio.q_spot
     portfolio_value = option_value + (portfolio.q_spot * S)
 
-    return (; portfolio_value, Δ_options, Γ_net, ν_net, Θ_net)
+    return (; portfolio_value, Δ_nets, Γ_net, ν_net, Θ_net)
 end
 
 function update_from_fills!(
@@ -50,15 +51,15 @@ end
 function execute_hedge!(
     portfolio::Portfolio,
     target_Δ::Float64,
-    Δ_options::Float64,
+    current_net_Δ::Float64,
     S::Float64,
     config::SimConfig
 )
-    shares_to_trade = target_Δ - Δ_options
+    shares_to_trade = target_Δ - current_net_Δ
     hedge_cost      = config.κ * abs(shares_to_trade) * S
 
     portfolio.cash   -= shares_to_trade * S + hedge_cost
-    portfolio.q_spot  = portfolio.q_spot + shares_to_trade
+    portfolio.q_spot += shares_to_trade
 
     return shares_to_trade, hedge_cost
 end

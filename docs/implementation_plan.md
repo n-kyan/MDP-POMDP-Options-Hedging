@@ -35,6 +35,8 @@ The agent's goal is **not** to outsmart the market about fair value — it is to
 
 We remove the hard inventory bounds (max Q per side) from the original AS formulation. Instead, inventory risk is managed through the soft penalty $\phi \cdot \Delta_{\text{net}}^2$ in the reward function. This is more flexible than hard limits: the agent learns its own risk tolerance rather than having it imposed. AS required bounded inventory for their closed-form analytical solution; since we're solving with RL, we don't need that constraint. This is noted as a deliberate departure from AS in the paper.
 
+**Hedge action design:** Hedge actions are absolute net-delta targets `[:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]`. The agent picks a destination in net-delta space. `execute_hedge!(portfolio, target_Δ, current_net_Δ, S, config)` trades `target_Δ - current_net_Δ` shares to reach the target. `:no_trade` skips execution entirely (zero cost). `compute_portfolio` returns `net_Δ = Δ_options + q_spot` rather than `Δ_options` in isolation, since the absolute target design only requires the aggregate.
+
 ---
 
 ## Module Inventory
@@ -125,7 +127,29 @@ In Levels 1-2, V_believed = V_market (agent has same info as market), so fills a
 
 ### Module 7: Analytical Benchmarks — `benchmarks.jl`
 
-**From scratch.** Spread benchmarks: AS optimal spread, GLF-T asymptotic depths. Hedge benchmarks: Leland modified delta, Whalley-Wilmott bandwidth. Includes `run_benchmark` for simulation comparison.
+**From scratch.** Provides analytical benchmark policies that plug into the same environment as the RL agent, enabling direct P&L comparison.
+
+**Key adaptation:** AS and GLF-T spread formulas were derived for stocks. For options, the inventory risk term uses **dollar gamma** instead of raw volatility: $\gamma \sigma^2 \tau \rightarrow \gamma \cdot \Gamma S^2 \sigma^2 \cdot \tau$. This is the correct substitution because the dealer holds options, whose P&L variance is driven by gamma, not by the stock's vol directly. This adaptation is a stated contribution in the derivatives paper.
+
+All benchmark functions take `σ` as an explicit parameter. The caller (module 8 evaluation harness) decides whether to pass the true regime vol (oracle benchmark) or a fixed vol (constant-vol benchmark). This keeps the benchmarks agnostic about information level.
+
+**Spread benchmark functions** — take `(Γ, S, σ, τ, config)`, snap continuous optimal spread to nearest discrete `spread_levels` index:
+- `as_spread_policy(env, config, σ)` → spread_idx (options-adapted AS)
+- `glft_spread_policy(env, config, σ)` → spread_idx (options-adapted GLF-T, primary benchmark)
+- `symmetric_spread_policy(spread_idx)` → spread_idx (fixed level, naive baseline)
+
+**Hedge benchmark functions** — take current state and `σ`, return hedge_idx into `Δ_targets`:
+- `ww_hedge_policy(env, config, σ)` → hedge_idx (Whalley-Wilmott no-trade band; `:no_trade` when inside band, nearest target when outside)
+- `leland_hedge_policy(env, config, σ)` → hedge_idx (Leland modified vol delta, rebalance every step)
+- `naive_delta_hedge_policy(env, config)` → hedge_idx (target `0.0` every step, no transaction cost awareness)
+
+**Combined policies** — pair spread + hedge into a single `MarketMakingAction`:
+- `as_ww_policy(env, config, σ)` → `MarketMakingAction`
+- `glft_ww_policy(env, config, σ)` → `MarketMakingAction`
+- `symmetric_naive_policy(spread_idx, env, config)` → `MarketMakingAction`
+
+**Runner:**
+- `run_benchmark(policy_fn, config, vol_model, n_episodes, rng)` → NamedTuple of results (P&L per episode, spread history, hedge frequency, Sharpe ratio)
 
 **Dependencies:** types.jl, black_scholes.jl, environment.jl. **Target:** April 13.
 
@@ -141,7 +165,7 @@ In Levels 1-2, V_believed = V_market (agent has same info as market), so fills a
 
 ### Module 9: Value Iteration Solver — `value_iteration.jl`
 
-**From scratch.** Tabular VI for Level 1. ~2,000 states across (Δ_net, moneyness, τ, hedge_position). 30 actions.
+**From scratch.** Tabular VI for Level 1. ~2,000 states across (net_Δ, moneyness, τ, regime). 40 actions (5 spread × 8 hedge).
 
 **Dependencies:** types.jl, environment.jl. **Target:** April 13.
 

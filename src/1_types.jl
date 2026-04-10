@@ -23,7 +23,7 @@ Base.@kwdef struct SimConfig
 
     # --- Action space ---
     spread_levels::Vector{Float64} = [0.05, 0.10, 0.20, 0.40, 0.80]
-    Δ_targets::Vector{Float64} = [:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]
+    Δ_targets::Vector{Union{Symbol, Float64}} = [:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]
 end
 
 struct VolModel
@@ -108,7 +108,7 @@ struct OptionContract
 end
 
 # Total number of discrete actions (spread levels × hedge targets).
-n_actions(config::SimConfig) = length(config.spread_levels) * length(config.hedge_targets)
+n_actions(config::SimConfig) = length(config.spread_levels) * length(config.Δ_targets)
 
 # Agent's chosen action: which spread level and which hedge target.
 struct MarketMakingAction
@@ -117,14 +117,14 @@ struct MarketMakingAction
 end
 
 function action_from_index(i::Int, config::SimConfig)
-    n_hedge = length(config.hedge_targets)
+    n_hedge = length(config.Δ_targets)
     spread_idx = div(i - 1, n_hedge) + 1
     hedge_idx = mod(i - 1, n_hedge) + 1
     return MarketMakingAction(spread_idx, hedge_idx)
 end
 
 function action_to_index(a::MarketMakingAction, config::SimConfig)
-    n_hedge = length(config.hedge_targets)
+    n_hedge = length(config.Δ_targets)
     return (a.spread_idx - 1) * n_hedge + a.hedge_idx
 end
 
