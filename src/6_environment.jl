@@ -176,10 +176,13 @@ function step_environment!(
         portfolio, env.current_options, S_new, τ_new, regime_belief_new, σ_regimes, config.r
     )
 
-    # 15 Update environment
+    # 15. Update environment
     env.agent_state = next_state
     env.vol_state   = vs_new
+
+    # 16. Construct StepInfo Struct
+    step_info = StepInfo(log_return, fill, shares_traded, hedge_cost, wealth_before, wealth_after)
     
-    return next_state, reward, done, log_return, fill
+    return next_state, reward, done, step_info
 end
 

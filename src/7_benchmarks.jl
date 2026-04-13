@@ -272,7 +272,7 @@ function run_benchmark(
             # Track current net delta before step
             push!(all_net_Δ, abs(env.agent_state.net_Δ))
 
-            next_state, reward, done, _, _ = step_environment!(
+            next_state, reward, done, _ = step_environment!(
                 env, portfolio, action, config, rng; level=level
             )
             ep_reward += reward

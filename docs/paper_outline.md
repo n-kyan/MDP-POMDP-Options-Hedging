@@ -1,72 +1,141 @@
-# Paper Outlines and Abstract
-
-This document contains outlines for both papers and a shared abstract.
-
----
-
-## Shared Abstract
-
-**Options Market Making Under Uncertainty: A POMDP Approach to Joint Spread and Hedge Optimization**
-
-We study an options market maker who jointly optimizes bid-ask spread width and delta-hedge ratio under stochastic, partially observable volatility. The market maker quotes calls and puts at a single strike, accumulates inventory through stochastic fills, and hedges directional exposure by trading the underlying with proportional transaction costs on each hedge adjustment. We model order arrival using the exponential fill intensity of Avellaneda and Stoikov (2008) and volatility dynamics as a 2-state Markov regime-switching process calibrated to S&P 500 returns following Hardy (2001). Critically, the market consensus option price — against which the agent's fill probabilities are computed — is modeled as a belief-weighted Black-Scholes price derived from a Hamilton (1989) filter updated on publicly observable return data only. At the highest level of complexity, the true volatility regime is also hidden from the agent, creating a partially observable Markov decision process (POMDP) in which the agent maintains a separate belief updated on both returns and its own fill outcomes. Because the market cannot observe the agent's order flow, fill asymmetry (i.e., lopsided execution rates signaling mispricing relative to the market consensus) constitutes a private information signal that accelerates regime inference beyond what public returns alone permit. We compare three levels of environmental complexity: constant known volatility (solved via value iteration), regime-switching with known regime (solved via Monte Carlo tree search and deep Q-networks), and regime-switching with hidden regime (solved via QMDP and online POMDP methods). The learned policies are benchmarked against the Guéant-Lehalle-Fernandez-Tapia (2013) optimal market-making strategy for spread-setting and the Whalley-Wilmott (1997) asymptotic hedging bandwidth for delta management. To our knowledge, this is the first work to jointly learn both spread and hedge policies for options under regime-switching volatility, the first to use fill asymmetry as a POMDP observation for volatility regime inference, and the first to model the market consensus price as a dynamically filtered belief rather than a point estimate of current-regime volatility.
+# Paper Outlines
 
 ---
 
 ## Paper 1: Derivatives Course (Due April 17, 8–10 pages)
 
-**Title:** Options Market Making Under Regime-Switching Volatility: A Simulation-Based Analysis of Joint Spread and Hedge Optimization
+**Title:** Options Market Making Under Regime-Switching Volatility: A Simulation Study of Spread and Hedge Policy Interactions
 
-**Emphasis:** Financial modeling, derivatives theory, market microstructure, benchmark comparisons.
+**Emphasis:** Financial modeling, derivatives theory, market microstructure, benchmark comparison results.
+
+**Scope note:** This paper covers Modules 1–8 only. RL solvers (value iteration, DQN, MCTS, QMDP, POMCPOW) are explicitly deferred to the companion DMU paper. The paper is self-contained — the simulation framework and benchmark results constitute a complete contribution without RL.
+
+---
 
 ### Section 1: Introduction (1 page)
 
-Motivate the problem from the perspective of an options market maker. The core tension: wider spreads earn more edge per fill but reduce order flow, while frequent hedging reduces risk but incurs transaction costs. Under stochastic volatility, the optimal trade-off is state-dependent. Existing analytical solutions (AS, GLF-T) assume constant or known volatility — when volatility is uncertain, these solutions are suboptimal and learned policies can improve.
+Motivate from the perspective of a real options market maker. The core tension: wider spreads earn more edge per fill but reduce order flow; frequent hedging reduces delta risk but incurs transaction costs proportional to trade size. Under stochastic volatility these tradeoffs are state-dependent — the optimal spread and hedge policy in a calm low-vol regime differs from the optimal policy in a turbulent high-vol regime.
 
-State the contribution: a simulation framework for options market making that extends the Avellaneda-Stoikov stock market-making model to options with regime-switching volatility, benchmarked against analytical optimal strategies. Highlight the dual-filter market model as a key design choice: rather than treating the market as clairvoyant about the current volatility regime, we model the market as a Bayesian agent that updates on public return information, which is the more realistic assumption and the one that gives fill asymmetry its economic content.
+Existing analytical solutions (Avellaneda-Stoikov 2008, Guéant et al. 2013, Whalley-Wilmott 1997) were derived for single-volatility environments. This paper builds a simulation framework that extends these benchmarks to a two-regime Markov-switching volatility environment calibrated to S&P 500 data, and evaluates how the spread and hedge components of each policy interact.
+
+State three contributions:
+1. Extension of the GLF-T spread formula and WW hedge formula to options via the dollar-gamma substitution γσ²τ → γ·Γ·S²·σ²·τ.
+2. A simulation framework for options market making under regime-switching volatility with a transition-weighted market pricing model.
+3. A four-policy factorial design isolating the independent and interactive contributions of the spread formula and hedge rule to P&L and Sharpe ratio.
+
+---
 
 ### Section 2: Literature Review (1.5 pages)
 
-Organize around three streams. The market-making stream covers Ho & Stoll (1981), Avellaneda & Stoikov (2008), Guéant et al. (2013), and Cartea, Jaimungal & Penalva (2015). The hedging-under-costs stream covers Black-Scholes, Leland (1985), Whalley & Wilmott (1997), and Davis et al. (1993). The regime-switching stream covers Hamilton (1989), Hardy (2001), and Ang & Timmermann (2012). Conclude by noting the gap: no existing work combines market-making spread optimization with learned hedging for options under stochastic volatility, and no prior simulation model of options market making treats the market consensus price as a dynamically filtered belief.
+**Market-making stream:** Ho & Stoll (1981) — inventory risk framework. Avellaneda & Stoikov (2008) — exponential fill intensity, optimal spread for stocks. Guéant, Lehalle & Fernandez-Tapia (2013) — rigorous control problem with bounded inventory, Proposition 3 closed form. Cartea, Jaimungal & Penalva (2015) — inventory penalty reward structure.
+
+**Hedging-under-costs stream:** Black-Scholes (1973) — frictionless replication baseline. Leland (1985) — modified volatility under transaction costs. Davis, Panas & Zariphopoulou (1993) — option pricing as stochastic control under transaction costs. Whalley & Wilmott (1997) — asymptotic no-trade bandwidth, the key practical benchmark.
+
+**Regime-switching stream:** Hamilton (1989) — Markov-switching model and filter. Hardy (2001) — calibrated RSLN-2 model for equity returns (our parameter source). Kim (1994) — dynamic linear models with Markov switching.
+
+Gap to fill: no existing work combines market-making spread optimization with transaction-cost-aware hedging for options under regime-switching volatility, with all components (spread formula, hedge rule, market pricing) derived consistently within the same stochastic vol framework.
+
+---
 
 ### Section 3: Model (2.5 pages)
 
-**3.1 Environment.** GBM spot dynamics with regime-switching volatility. Hardy (2001) calibrated parameters. Risk-neutral drift. Black-Scholes pricing and Greeks. Sequential option lifetimes.
+**3.1 Spot price dynamics.**
+Two-state regime-switching GBM with risk-neutral drift μ = r. Parameters from Hardy (2001): σ₁ = 12.1% (low-vol), σ₂ = 26.9% (high-vol), daily transition matrix [0.9982 0.0018; 0.0022 0.9978], stationary distribution π₁ ≈ 0.55, π₂ ≈ 0.45. Average regime duration ~500 trading days — regimes are highly persistent, switching rarely within a single episode. Risk-neutral drift prevents policies from learning directional biases.
 
-**3.2 Market-making mechanism.** Fill model from AS: λ(δ) = Ae^{-kδ}. Discrete spread levels calibrated to hedge cost and vega.
+**3.2 Market pricing and the fill model.**
+The key modeling choice: what option price does the market use to decide whether to fill the agent's quotes?
 
-The key modeling choice is what constitutes the "true value" against which fill probabilities are computed. Using the current-regime Black-Scholes price would mean the market is perfectly informed about the volatility regime — effectively clairvoyant — while the agent must infer it. This inverts the real-world relationship in which market consensus is the more informed price. Instead, we model the market as running a Hamilton filter updated only on publicly observable log returns, producing a belief-weighted consensus price:
+We model the market as using a **transition-weighted Black-Scholes price**:
 
-$$V_{\text{market}} = \sum_j \xi_j^{\text{market}} \cdot V_{\text{BS}}(\sigma_j)$$
+$$V_{\text{market}} = \sum_j P(\text{regime}_{t+1} = j \mid \text{regime}_t = i) \times V_{\text{BS}}(\sigma_j)$$
 
-Fill probabilities are computed against $V_{\text{market}}$, not against the true-regime price. The agent quotes around its own belief-weighted price $V_{\text{believed}}$. When the agent's belief diverges from the market's — for example, because a recent string of large returns has moved the market toward high-vol while the agent has not yet updated — the agent's quotes are mis-centered and fills become asymmetric. The four-component P&L decomposition follows.
+where $i$ is the current true regime. This is the one-step-ahead expected fair value given perfect regime knowledge. It is marginally different from $V_{\text{BS}}(\sigma_i)$ (the current-regime price) because it accounts for the small probability of switching volatility by the next step. This is more intellectually defensible than treating the market as clairvoyant about instantaneous vol — real market consensus aggregates participants' estimates of near-future pricing, not just current-moment pricing.
 
-**3.3 Hedging mechanism.** Discrete absolute net-delta targets: `[:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]`. The agent picks a destination in net-delta space at each step; `execute_hedge!` trades the difference between target and current `net_Δ`, charging proportional transaction costs κ·|shares traded|·S. `:no_trade` incurs zero cost and is the action the Whalley-Wilmott benchmark uses when inside its no-trade band. Absolute targets were chosen over fractional targets because (a) `net_Δ` is observable in agent state while `Δ_options` in isolation is not, and (b) the agent's cost of each action is a direct function of its current `net_Δ`, which the agent observes. Range ±0.3 discourages directional speculation; step size 0.1 is a tunable parameter noted for future refinement.
+Fill probabilities follow Avellaneda-Stoikov (2008): $\lambda(\delta) = A e^{-k\delta}$ where $\delta$ is the distance between the agent's quote and V_market. The agent quotes around its own believed fair value; when the agent uses the transition-weighted oracle σ (as in these benchmarks), quotes are well-centered and fills are approximately symmetric.
 
-**3.4 Reward function.** Running delta penalty r = pnl - φ·Δ_net², adapted from CJP's (2015) inventory penalty. Justification via CARA equivalence under Gaussian returns.
+**3.3 Portfolio and reward.**
+The agent holds an inventory of options and a hedge position in the underlying. Portfolio Greeks (Δ, Γ, ν, Θ) are computed via belief-weighted Black-Scholes. The reward at each step is:
+
+$$r_t = \Delta\text{PnL}_t - \phi \cdot \Delta_{\text{net},t}^2$$
+
+where the four P&L components are: (1) mark-to-market on options, (2) spread capture from fills, (3) hedge P&L on underlying shares, (4) hedge transaction cost $\kappa \cdot |\text{shares traded}| \cdot S$. The quadratic delta penalty $\phi \cdot \Delta_{\text{net}}^2$ is adapted from Cartea et al. (2015) and is proportional to P&L variance under Gaussian returns (CARA equivalence).
+
+**3.4 Spread action space.**
+Six discrete half-spread levels: $[0.05, 0.10, 0.20, 0.40, 0.80, 1.60]$ dollars. At each step the agent chooses a level; `compute_quotes` centers bid and ask symmetrically around V_believed at the chosen half-spread.
+
+**3.5 Hedge action space.**
+Fourteen discrete absolute net-delta targets: $\{:\text{no\_trade}, -0.30, -0.25, \ldots, 0.25, 0.30\}$. The agent picks a destination in net-delta space; `execute_hedge!` trades the difference between the target and current net_Δ, charging κ·|shares|·S. `:no_trade` is zero cost and corresponds to the WW "inside the band" decision.
+
+Absolute targets were chosen over fractional targets because net_Δ is directly observable while Δ_options in isolation is not, and the transaction cost of each action is a direct function of the observable state.
+
+---
 
 ### Section 4: Analytical Benchmarks (1 page)
 
-Present the three spread benchmarks (symmetric, AS, GLF-T) and three hedge benchmarks (naive BS delta, Leland, Whalley-Wilmott) with their exact formulas. Explain what each captures and what it misses. Note that all three spread benchmarks assume the market correctly prices at the current-regime vol — they serve as useful calibration targets for Level 1, but are strictly misspecified for Levels 2 and 3.
+Four policies evaluated in a factorial design — two spread choices × two hedge choices — to isolate each component's contribution.
 
-**Key adaptation to state explicitly:** AS and GLF-T were derived for stocks, where the dealer holds inventory in shares. For options, the inventory risk term must use **dollar gamma** rather than raw volatility. The substitution is $\gamma\sigma^2\tau \rightarrow \gamma \cdot \Gamma S^2 \sigma^2 \cdot \tau$, because the P&L variance of an options position is driven by gamma (the rate of change of delta) rather than the stock's vol directly. This produces spread formulas that widen near-the-money and at short expiries — exactly the behavior real options market makers exhibit. This adaptation is a stated contribution of the paper.
+**Spread policies:**
 
-**Whalley-Wilmott no-trade band:** The half-bandwidth $H = \left(\frac{3\kappa}{2} \cdot \frac{\Gamma^2 S^2 \sigma^2}{\phi}\right)^{1/3} \cdot \Delta t^{1/3}$ defines a region around the current delta where rebalancing is suboptimal. For typical ATM parameters with our calibration, $H \approx 0.05$–$0.08$ net-delta units — smaller than the 0.1 step size in our action space, which motivates the `:no_trade` action as the primary mechanism for capturing this behavior.
+*GLF-T (primary):* From Guéant, Lehalle & Fernandez-Tapia (2013), adapted for options via dollar-gamma substitution:
 
-### Section 5: Solution Method (0.5 pages)
+$$\delta^*_{\text{GLF-T}} = \gamma \cdot \Gamma S^2 \sigma^2 \tau + \frac{2}{\gamma} \ln\left(1 + \frac{\gamma}{k}\right)$$
 
-Brief description of value iteration over discretized state space. Mention that more advanced solvers (MCTS, DQN, POMDP) are applied in companion work — keep this short since the DMU paper covers algorithms in depth.
+The first term is the inventory risk premium — it scales with dollar-gamma $\Gamma S^2 \sigma^2$, not raw volatility, because the P&L variance of an options position is driven by gamma rather than vol directly. This produces spreads that widen near-the-money and near expiry — exactly the behavior real options market makers exhibit. The dollar-gamma substitution is a stated contribution.
 
-### Section 6: Results (2 pages)
+*Naive (baseline):* Fixed half-spread of $0.10 regardless of market conditions. Represents a market maker who sets spreads by convention rather than formula.
 
-**6.1 Environment validation.** Under constant vol, the RL agent's spread policy matches GLF-T and its hedge policy matches the Whalley-Wilmott bandwidth. Because $V_{\text{market}}$ converges to the true price when both the market and the agent have no regime uncertainty, the dual-filter architecture is consistent with the analytical benchmarks in the degenerate case. This validates the simulation.
+**Hedge policies:**
 
-**6.2 Regime-switching advantage.** Under regime-switching, the RL agent outperforms constant-vol benchmarks by adapting spread and hedge to the current regime. Show P&L distribution comparison (histograms like AS Figure 2), Sharpe ratios, and hedge frequency.
+*Whalley-Wilmott (primary):* No-trade band with half-bandwidth:
 
-**6.3 Sensitivity analysis.** Transaction cost sensitivity surface showing how optimal policy changes with κ. Spread-hedge coordination: how the agent trades off tighter spreads (more fills, more delta risk) against more aggressive hedging (more cost).
+$$H = \left(\frac{3\kappa}{2\phi} \cdot \Gamma^2 S^2 \sigma^2\right)^{1/3} \cdot \Delta t^{1/3}$$
 
-### Section 7: Discussion and Future Work (0.5 pages)
+When $|\text{net\_Δ}| \leq H$: take the `:no_trade` action (zero cost). When outside: trade to the band edge. Again the dollar-gamma adaptation is required — the original WW formula uses stock-level volatility while we use option dollar-gamma.
 
-Discuss limitations: stylized simulation, no empirical validation, single strike. The dual-filter market model is itself a simplification — real market consensus reflects heterogeneous participants with different models and risk appetites, not a single Bayesian agent. Future directions: multi-strike, continuous action spaces (DDPG), real data calibration, the full POMDP extension (the subject of the DMU companion paper).
+*Naive (baseline):* Always target net_Δ = 0. Rebalances fully every step regardless of transaction cost.
+
+**Oracle σ for all policies:** All benchmark policies receive the transition-row-weighted variance-equivalent effective volatility:
+
+$$\sigma_{\text{eff}} = \sqrt{\sum_j P(\text{regime}_{t+1} = j \mid \text{regime}_t = i) \cdot \sigma_j^2}$$
+
+This is the natural single-σ input consistent with the two-regime world — it gives the benchmarks the same information the market uses, ensuring that any performance differences are due to policy quality rather than information asymmetry.
+
+---
+
+### Section 5: Results (3 pages)
+
+**5.1 Spread behavior (Figure 2).**
+GLF-T spread width rises from ~$0.40 at full expiry (63 days) to ~$0.64 at peak (~45 days) then declines near expiry as tau → 0 reduces the inventory risk term. The peak at 45 days (not at 1 day) reflects the gamma term: ATM gamma is highest near expiry but the τ multiplier in the GLF-T formula reduces spread as tau → 0, producing the observed hump shape. Under regime-switching, the peak is slightly lower (~$0.60) because the effective σ from transition-weighting is slightly lower than the constant-vol σ = 0.20 in the low-vol regime. Naive spread is flat at $0.10 by construction.
+
+**5.2 Hedge behavior (Figure 3).**
+WW policies hedge approximately 45% of timesteps versus 100% for Naive hedge. This is the WW no-trade band functioning as designed — roughly half the time the portfolio delta is within the band [−H, H] and trading is suboptimal given transaction costs. Naive+WW hedges slightly more frequently (62%) than GLF-T+WW (45%) because the tight spread causes faster inventory accumulation, pushing delta outside the band more often.
+
+Mean |net Δ| is lowest for GLF-T+Naive (0.054) despite 100% hedge frequency. This is because the wide GLF-T spread produces few fills and therefore slow inventory accumulation — there is rarely much delta to hedge, so each rebalancing trade is small. WW with a naive spread produces the highest |net Δ| (0.220) because the tight spread floods inventory while WW allows delta to accumulate within its no-trade band.
+
+**5.3 P&L distributions (Figure 1) and summary table.**
+
+*Table 1* [include full table from results].
+
+Three findings:
+
+*Finding 1 — Spread formula dominates variance reduction.* GLF-T cuts Std P&L roughly in half versus Naive spread (6.06 vs ~10–12). Hedging choice has minimal effect on variance when spread is already wide. The wide spread reduces fill frequency and inventory accumulation, which is the primary source of P&L variance in this environment.
+
+*Finding 2 — WW's value is cost savings, not delta management.* GLF-T+WW saves $1.04/episode in hedge costs versus GLF-T+Naive ($3.73 vs $4.77) while producing essentially the same mean P&L and variance. For Naive spreads, WW saves $3.57/episode ($14.45 vs $18.02). However, naive hedge costs ($18.02/episode) exceed total mean P&L ($11.39), meaning the strategy would be unprofitable if not for spread capture income. WW is an important cost optimization but does not rescue a fundamentally misspecified spread policy.
+
+*Finding 3 — Regime switching amplifies Naive policy variance disproportionately.* Std P&L for GLF-T+WW increases 6.6% under regime switching (6.06 → 6.46). For Naive+WW it increases 20.3% (11.93 → 14.35). This asymmetry arises because GLF-T's spread formula adapts to the current effective σ — when regime-switching changes the oracle σ, GLF-T adjusts spread width accordingly. Naive spreads are fixed at $0.10 regardless of vol regime, so they absorb the full variance impact of regime switches. This result directly motivates the DMU paper's RL extension: a policy that can learn to adapt both spread and hedge jointly to regime changes should recover the variance penalty.
+
+**5.4 Cumulative P&L traces (Figure 4).**
+Single-episode traces under constant vol and Hardy regime-switching show the staircase structure characteristic of spread capture — P&L accumulates in discrete jumps at fill events, interrupted by hedge costs. GLF-T policies show smoother, more monotone accumulation; Naive policies show wider swings. High-vol regime periods (shaded) do not always correlate with drawdowns because regime-switching vol also widens GLF-T spreads, increasing per-fill revenue to partially offset increased delta risk.
+
+---
+
+### Section 6: Discussion and Future Work (0.5 pages)
+
+**Main takeaway:** The spread formula is the primary determinant of P&L quality under stochastic volatility. GLF-T's dollar-gamma adaptation correctly widens spreads when gamma is high (near expiry, ATM), which both increases per-fill revenue and reduces inventory accumulation. WW adds meaningful value through transaction cost savings but cannot rescue a misspecified spread policy.
+
+**Limitations:** Stylized simulation, single strike, no empirical calibration beyond Hardy (2001) parameters, discrete action space may underperform continuous policies near WW band boundaries.
+
+**Future work:** The natural extension is a learned policy that jointly optimizes spread and hedge through simulation — an MDP/POMDP formulation solved via reinforcement learning. Such a policy would be evaluated against these analytical benchmarks and its advantage would be precisely quantifiable through the factorial decomposition introduced here. This is the subject of the companion DMU paper.
 
 ---
 
@@ -74,64 +143,79 @@ Discuss limitations: stylized simulation, no empirical validation, single strike
 
 **Title:** Joint Spread and Hedge Optimization for Options Market Making: From MDPs to POMDPs Under Hidden Volatility Regimes
 
-**Emphasis:** MDP/POMDP formulation, solver comparison, cost of partial observability, course content application.
+**Emphasis:** MDP/POMDP formulation, solver comparison, cost of partial observability, fill asymmetry as private information signal.
 
-### Section 1: Introduction (0.5 pages)
-
-Frame as: options market making is a natural application of DMU course content. The problem involves sequential decision-making under uncertainty (MDP), exploration-exploitation (RL), and hidden state inference (POMDP). Briefly state the three levels of complexity and the two key quantitative results: the cost of partial observability (the performance gap between knowing and not knowing the regime) and the value of private information (the additional performance gained by incorporating fill asymmetry into the agent's belief update, relative to using returns alone).
-
-### Section 2: Problem Formulation (1.5 pages)
-
-**2.1 MDP formulation.** State space (net_Δ, moneyness, τ, regime), action space (5 spread × 8 hedge = 40 actions), transition dynamics (regime-switching GBM + fill model), reward function (pnl - φ·Δ_net²). Formal notation matching Kochenderfer's textbook.
-
-Hedge actions are **absolute net-delta targets** `[:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]`. The agent picks a destination in net-delta space; `net_Δ` in the state tells it how expensive each target is to reach. `:no_trade` is the zero-cost action corresponding to the Whalley-Wilmott "inside the band" decision. This formulation was chosen over fractional hedging because: (1) `net_Δ` is directly observable while `Δ_options` alone is not; (2) absolute targets allow the agent to reason about transaction cost without needing to know the decomposition of `net_Δ` into its option and spot components.
-
-**2.2 POMDP extension.** Hidden state (volatility regime). Observation model: log return (magnitude is a public signal of regime) and fill outcome (a private signal — the market cannot observe the agent's fills).
-
-The distinction between public and private observations motivates the dual-filter architecture. The environment maintains a *market belief* $\xi^{\text{market}}$ updated each step on log returns only — this determines the market consensus price $V_{\text{market}}$ against which fill probabilities are computed. The agent maintains a separate *agent belief* $\xi^{\text{agent}}$ updated on both log returns and fill outcomes. The two filters run in parallel, diverging when the agent's fill signal provides information that the return signal has not yet delivered.
-
-This architecture makes fill asymmetry genuinely informative in a formal sense: because the market prices at $V_{\text{market}}$ (not the true-regime price), the agent's quotes can be correctly centered relative to the true regime while still diverging from $V_{\text{market}}$, producing asymmetric fills. The direction and magnitude of the asymmetry are a function of how far the agent's belief has advanced ahead of the market's, giving the agent a quantifiable private information advantage.
-
-Belief update for both filters: four-step Hamilton filter. Agent filter uses all four steps including the fill likelihood $P(\text{fill\_outcome} \mid \rho = j)$. Market filter skips the fill likelihood step. Both initialize at the stationary distribution $(\pi_1, \pi_2)$.
-
-### Section 3: Solvers (1.5 pages)
-
-**3.1 Value iteration** (Level 1). Discretized state space, Bellman backup, convergence. From scratch.
-
-**3.2 MCTS with DPW** (Level 2). Online planning for the regime-switching MDP. DPWSolver from POMDPs.jl. Why online planning suits this problem: the expanded state space makes tabular methods intractable.
-
-**3.3 DQN** (Level 2). Neural network architecture, replay buffer, ε-greedy exploration, target network. From scratch using Flux.jl. How the regime is encoded as a feature.
-
-**3.4 QMDP** (Level 3). Solve the MDP per regime, weight Q-values by belief. From scratch. Discuss the QMDP approximation assumption (assumes full observability at next step) and when it breaks down — in particular, QMDP cannot exploit the fill signal's informational advantage because it does not plan through the belief update. This makes QMDP a useful lower bound on POMDP performance.
-
-**3.5 POMCPOW** (Level 3). Online POMDP solver from POMDPs.jl. How it handles the continuous observation space (returns) and discrete action space. POMCPOW can in principle plan through the fill signal's informational content, making it the upper bound on learned POMDP performance.
-
-### Section 4: Results (2 pages)
-
-**4.1 Level 1 validation.** Value iteration policy matches analytical benchmarks. Policy visualization showing learned spread and hedge as functions of state variables. In Level 1, the market and agent have no regime uncertainty, so $V_{\text{market}} = V_{\text{believed}} = V_{\text{true-regime}}$ and the dual-filter architecture reduces to the standard model.
-
-**4.2 Level 2: Regime-switching.** MCTS vs. DQN comparison. Both outperform constant-vol benchmarks. Show how the learned policy differs across regimes — wider spreads and more cautious hedging in the high-vol regime.
-
-**4.3 Level 3: Hidden regime.** QMDP and POMCPOW results. Three nested performance comparisons, each isolating a distinct information effect:
-
-- *Cost of partial observability:* Level 2 (regime known) minus Level 3 (regime hidden). This is the performance lost to not knowing the regime at all.
-- *Value of the fill signal:* Level 3 with fill-augmented belief minus a returns-only agent (one whose belief update is identical to the market's). This isolates the value of the private observation channel.
-- *Belief divergence dynamics:* Show a time series of the agent's belief vs. the market's belief, with the true regime overlaid. Annotate fill asymmetry events. Demonstrate that the agent's belief converges to the true regime faster than the market's — and that this speed advantage is what generates the fill signal's value.
-
-**4.4 Solver comparison table.** Across all three levels, compare: cumulative P&L (mean ± std), Sharpe ratio, computation time, policy interpretability.
-
-### Section 5: Discussion (0.5 pages)
-
-Connect to course content: which DMU concepts proved most valuable for this application. The dual-filter POMDP architecture as a novel contribution: modeling the "observation environment" (the market) as itself a Bayesian agent with limited information formalizes the intuition that fill flow is private information, and gives the POMDP layer a rigorous economic justification rather than an ad hoc one. Limitations and future work.
+**Note:** This paper presupposes the derivatives paper's financial setup. It focuses narrowly on the algorithmic contributions and DMU course connections. Results from Modules 9–13 are the primary content.
 
 ---
 
-## Key Figures (Both Papers)
+### Section 1: Introduction (0.5 pages)
 
-1. **Environment schematic:** Flow diagram showing the full timestep sequence — observe → choose action → compute V_market from market belief → execute hedge → simulate fills against V_market → update market belief (returns only) → update agent belief (returns + fills) → spot moves → reward. The two parallel belief update arrows should be visually distinct, showing the information asymmetry.
-2. **P&L distribution comparison:** Histograms for RL agent vs. analytical benchmarks (like AS Figure 2).
-3. **Policy surface:** Heatmap of learned spread level and hedge ratio as functions of (Δ_net, moneyness) or (Δ_net, regime).
-4. **Learned spread vs. GLF-T benchmark:** Overlay plot showing learned spread width vs. analytical optimal at each inventory level.
-5. **Belief divergence plot:** Time series showing three lines — the true regime (step function), the agent's belief (returns + fills), and the market's belief (returns only) — over a single episode containing at least one regime switch. Annotate the moments where fill asymmetry causes the agent's belief to diverge from the market's. This figure appears in the DMU paper and optionally in the derivatives paper's appendix.
-6. **Value of private information:** Bar chart or table decomposing performance into three layers: cost of partial observability (L2 − L3), value of fill signal (L3 with fills − L3 returns-only), and irreducible uncertainty floor.
-7. **Transaction cost sensitivity:** Surface or heatmap showing how optimal policy and Sharpe ratio change with κ.
+Options market making is a natural DMU application: sequential decision-making under uncertainty (MDP), partial observability of volatility regime (POMDP), exploration-exploitation (RL training), and Bayesian state estimation (Hamilton filter). Briefly state the three levels of complexity and preview the two key measurements: cost of partial observability and value of the fill signal as private information.
+
+---
+
+### Section 2: Problem Formulation (1.5 pages)
+
+**2.1 MDP formulation.** State space: (S, τ, net_Δ, net_Γ, net_ν, net_Θ, regime_belief). Action space: 6 spread × 14 hedge = 84 actions. Transition dynamics: regime-switching GBM + AS fill model. Reward: pnl - φ·Δ_net². Formal notation matching Kochenderfer's textbook.
+
+Reference the four analytical benchmark results from the derivatives paper as the performance baseline against which RL policies are compared.
+
+**2.2 POMDP extension.** Hidden state: volatility regime. Observations: log return (public signal of regime magnitude) and fill outcome (private signal — the market cannot observe the agent's fills).
+
+The dual-filter architecture: the market maintains a belief updated on log returns only (determines V_market). The agent maintains a separate belief updated on both log returns and fill outcomes. The two filters run in parallel, diverging when fill asymmetry provides information that the return signal has not yet delivered. This makes fill asymmetry formally informative: because V_market is belief-weighted (not true-regime), the agent's fill-augmented belief can advance ahead of the market's, giving a quantifiable private information advantage.
+
+---
+
+### Section 3: Solvers (1.5 pages)
+
+**3.1 Value iteration (Level 1).** Tabular VI over discretized state space. Bellman backup, convergence. Policy visualization: learned spread and hedge as functions of (net_Δ, τ, moneyness).
+
+**3.2 MCTS with DPW (Level 2).** DPWSolver from POMDPs.jl. Why online planning: expanded regime-switching state space makes tabular methods intractable.
+
+**3.3 DQN (Level 2).** 3-layer MLP, replay buffer, ε-greedy, target network. From scratch with Flux.jl. Regime index encoded as one-hot feature.
+
+**3.4 QMDP (Level 3).** Solve MDP per regime via VI, weight Q-values by Hamilton filter belief: a* = argmax_a Σⱼ belief_j · Q_j(s,a). QMDP approximation assumption: treats next state as fully observable. Cannot exploit fill signal's informational content — useful as lower bound on POMDP performance.
+
+**3.5 POMCPOW (Level 3).** Online POMDP solver from POMDPs.jl. Handles continuous observation space (log returns) with progressive widening. Can in principle plan through the fill signal update — upper bound on learned POMDP performance.
+
+---
+
+### Section 4: Results (2 pages)
+
+**4.1 Level 1 validation.** VI policy matches GLF-T spread and WW hedge in the constant-vol case, confirming the simulation is correctly implemented.
+
+**4.2 Level 2: Regime-switching.** MCTS vs DQN comparison against GLF-T+WW and GLF-T+Naive benchmarks. Show how learned spread policy adapts across regimes — wider spreads and more conservative hedging in high-vol regime.
+
+**4.3 Level 3: Hidden regime.** Three nested comparisons:
+- *Cost of partial observability:* Level 2 (known regime) minus Level 3 (hidden regime). Performance lost to not observing the regime.
+- *Value of fill signal:* Level 3 (returns + fills) minus Level 3 (returns only). Isolates the private information channel.
+- *Belief convergence:* Time series of agent belief vs market belief vs true regime over an episode with a regime switch. Show agent converges faster than market due to fill asymmetry.
+
+**4.4 Solver comparison table.** Mean P&L ± std, Sharpe, compute time, interpretability across all levels and solvers.
+
+---
+
+### Section 5: Discussion (0.5 pages)
+
+Connect to DMU course content: MDP (Levels 1–2), POMDP (Level 3), value iteration, online tree search, DQN, Hamilton filter as Bayesian state estimator, fill asymmetry as private observation. The dual-filter architecture as a contribution: modeling the market as a Bayesian agent with limited information gives the POMDP layer a rigorous economic justification rather than treating partial observability as a purely algorithmic challenge.
+
+---
+
+## Figures
+
+### Derivatives Paper Figures (complete)
+
+1. **Fig 1 — P&L distributions:** Histograms of episode P&L for all 4 policies under constant vol and Hardy regime-switching. ✓ Complete.
+2. **Fig 2 — Spread vs τ:** Mean GLF-T half-spread as a function of days to expiry. Shows hump-shaped pattern from dollar-gamma term. ✓ Complete.
+3. **Fig 3 — Hedge behavior:** Bar charts of hedge frequency and mean |net Δ| across all 4 policies. ✓ Complete.
+4. **Fig 4a — Cumulative P&L, constant vol:** Single episode trace. ✓ Complete.
+5. **Fig 4b — Cumulative P&L, Hardy:** Single episode trace with regime shading. ✓ Complete (legend vspan bug is cosmetic, not blocking).
+
+### DMU Paper Figures (pending — April 18–30)
+
+6. **Environment schematic:** Timestep flow diagram showing dual belief update architecture.
+7. **Policy surface:** Heatmap of learned spread and hedge as functions of (net_Δ, moneyness) under Level 1 VI.
+8. **Belief divergence plot:** Agent belief vs market belief vs true regime over an episode with a switch.
+9. **Value of private information:** Bar chart decomposing L2 − L3 gap and fill-signal value.
+10. **Solver comparison table:** Full cross-level results table.
