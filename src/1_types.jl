@@ -17,13 +17,14 @@ Base.@kwdef struct SimConfig
     # --- Fill model (AS 2008) ---
     A::Float64 = 140.0               # fill intensity  
     k::Float64 = 6.0                 # fill decay rate (calibrated for options)
+    γ_market::Float64 = 0.1          # dealer risk aversion for analytical benchmarks
 
     # --- Reward ---
     φ::Float64 = 0.01                # risk aversion (delta penalty weight)
 
     # --- Action space ---
-    spread_levels::Vector{Float64} = [0.05, 0.10, 0.20, 0.40, 0.80]
-    Δ_targets::Vector{Union{Symbol, Float64}} = [:no_trade, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3]
+    spread_levels::Vector{Float64} = [0.05, 0.10, 0.20, 0.40, 0.80, 1.60]
+    Δ_targets::Vector{Union{Symbol, Float64}} = [:no_trade, -0.3, -0.25, -0.2, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]
 end
 
 struct VolModel
@@ -158,6 +159,15 @@ mutable struct Portfolio
     function Portfolio() # Constructor for preallocated empty portfolio 
         new(Int[], 0.0, 0.0)
     end
+end
+
+# Record of what happended at each timestep
+struct FillOutcome
+    bid_filled::Bool
+    ask_filled::Bool
+    bid_price::Float64
+    ask_price::Float64
+    V_market::Float64
 end
 
 struct StepInfo

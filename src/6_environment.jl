@@ -169,8 +169,7 @@ function step_environment!(
     # 13. Compute Reward
     # portfolio.q_spot is already post-hedge (execute_hedge! ran at step 8)
     # port_after.Δ_options is computed at new S_new, τ_new (post market move)
-    net_Δ_after = port_after.Δ_options + portfolio.q_spot
-    reward      = compute_reward(wealth_before, wealth_after, net_Δ_after, config)
+    reward      = compute_reward(wealth_before, wealth_after, port_after.Δ_net, config)
 
     # 14. Build next agent state
     next_state = build_agent_state(

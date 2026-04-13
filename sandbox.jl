@@ -1,298 +1,275 @@
+# ============================================================
+# Module 7: Analytical Benchmarks
+# 7_benchmarks.jl
+# ============================================================
+# Provides two analytical benchmark policies to compare against the RL agent:
+#
+#   1. glft_ww_policy  — GLF-T spread + Whalley-Wilmott hedge (primary benchmark)
+#   2. symmetric_naive_policy — fixed spread + naive BS delta hedge (sanity floor)
+#
+# Each policy is run in two modes controlled by the σ_fn parameter:
+#   - Oracle:        σ_fn = env -> get_σ(env.vol_state)   (cheats, uses true regime vol)
+#   - Constant-vol:  σ_fn = env -> 0.20                   (fixed sigma, no regime info)
+#
+# All benchmark formulas take σ as an explicit argument — the benchmarks themselves
+# are agnostic about where σ comes from. The caller decides via σ_fn.
+# ============================================================
+
+include("1_types.jl")
+include("2_black_scholes.jl")
+include("3_spot_dynamics.jl")
+include("4_fills.jl")
+include("5_portfolio.jl")
+include("6_environment.jl")
+
+using Statistics: mean, std
+
+# ============================================================
+# Section 1: GLF-T Spread Formula
+# ============================================================
+
 #=
-============================================================================
-Module 6: Environment Step Function — environment.jl
-============================================================================
+GLF-T (Guéant-Lehalle-Fernandez-Tapia 2013) optimal half-spread, adapted for options.
 
-Wires modules 2–5 into a single `step_environment!` function and provides
-`initialize_episode!` to reset the simulation at the start of each episode.
+Original GLF-T derivation is for stocks, where inventory risk scales with σ²τ.
+For options, the relevant risk is dollar gamma: the P&L of an options position
+varies as (1/2)·Γ·S²·(dS)², so the inventory risk term becomes Γ·S²·σ²·τ.
 
-Architectural role:
-  - All pure math lives in black_scholes.jl and fills.jl.
-  - All accounting lives in portfolio.jl.
-  - This module is ONLY orchestration: call the right functions in the right
-    order, pass results between them, and manage state transitions.
+Formula: δ* = γ·|Γ|·S²·σ²·τ + (2/γ)·ln(1 + γ/k)
+  - First term:  inventory risk component — widen when gamma is high, vol is high, expiry is far
+  - Second term: market-making component — earn positive edge from the spread itself
 
-Belief update design:
-  The `belief_update_fn` keyword argument makes the belief update pluggable:
-    nothing (default) → Level 1/2: deterministic update (see below)
-    a function         → Level 3: Hamilton filter (provided by belief_updater.jl)
+Note: We use |Γ| because net_Γ can be negative for a short-gamma book.
+The spread should widen with gamma exposure regardless of sign.
 
-  Level 1 (n_regimes == 1): belief = [1.0], always.
-  Level 2 (n_regimes > 1, no fn provided): agent has perfect observability,
-    belief is one-hot on the true new regime after the market step.
-  Level 3 (fn provided): fn(belief, log_return, fill, ...) → new belief.
-============================================================================
+Args:
+  Γ      — net portfolio gamma (from agent_state.net_Γ)
+  S      — current spot price
+  σ      — volatility to use (caller decides: true regime vol or constant)
+  τ      — time to expiry in years
+  config — SimConfig (uses φ as γ and k as fill decay rate)
+
+Returns: continuous dollar half-spread (positive Float64)
 =#
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Episode Initialization
-# ─────────────────────────────────────────────────────────────────────────────
-
-#=
-Reset all simulation state to start a new episode.
-
-Sets up:
-  - A fresh Portfolio (zero inventory, zero cash, zero spot)
-  - A new VolState sampled from the stationary distribution
-  - An initial ATM call option at K = round(S0)
-  - Initial regime belief (Level 1/2 deterministic; Level 3 = stationary dist)
-  - Initial AgentState at τ = T_option × Δt years
-
-Returns the initial AgentState so the agent can start selecting actions.
-=#
-function initialize_episode!(
-    env::EnvironmentState,
-    portfolio::Portfolio,
-    vm::VolModel,
-    config::SimConfig;
-    level::Int = 2  # 1 = constant vol, 2 = known regime, 3 = hidden regime
-)
-    # Reset portfolio to zero
-    portfolio.cash   = 0.0
-    portfolio.q_spot = 0.0
-    empty!(portfolio.option_quantities)
-
-    # Fresh vol state (regime sampled from stationary distribution)
-    env.vol_state = VolState(vm)
-    env.options_completed = 0
-
-    # Initial ATM call at S0
-    empty!(env.current_options)
-    push!(env.current_options, OptionContract(round(config.S0), true))
-    push!(portfolio.option_quantities, 0)
-
-    # Initial τ in years: T_option trading days × Δt years/day
-    τ = config.T_option * config.Δt
-
-    # Initial regime belief
-    n_regimes = length(vm.σ_levels)
-    regime_belief = compute_initial_belief(env.vol_state, n_regimes, level)
-
-    # Build initial AgentState
-    σ_regimes = vm.σ_levels
-    initial_state = build_agent_state(
-        portfolio, env.current_options, config.S0, τ, regime_belief, σ_regimes, config.r
-    )
-    env.agent_state = initial_state
-
-    return initial_state
+function glft_half_spread(Γ::Float64, S::Float64, σ::Float64, τ::Float64, config::SimConfig)::Float64
+    γ = config.φ
+    k = config.k
+    inventory_term     = γ * abs(Γ) * S^2 * σ^2 * τ
+    market_making_term = (2.0 / γ) * log(1.0 + γ / k)
+    return inventory_term + market_making_term
 end
 
-# Computes the agent's initial regime belief based on the level of the simulation.
-function compute_initial_belief(vs::VolState, n_regimes::Int, level::Int)
-    if n_regimes == 1 || level == 1
-        return [1.0]
-    elseif level == 2
-        # Perfect observability: one-hot on the true starting regime
-        return [vs.regime_idx == i ? 1.0 : 0.0 for i in 1:n_regimes]
+# Snap a continuous half-spread to the nearest discrete spread level index.
+# Example: half_spread=0.13, spread_levels=[0.05,0.10,0.20,0.40,0.80]
+#   diffs = [0.08, 0.03, 0.07, 0.27, 0.67] → argmin = 2 (the 0.10 level)
+function nearest_spread_idx(half_spread::Float64, config::SimConfig)::Int
+    diffs = abs.(config.spread_levels .- half_spread)
+    return argmin(diffs)
+end
+
+# GLF-T spread policy: compute optimal half-spread from current Greeks, snap to grid.
+function glft_spread_idx(env::EnvironmentState, config::SimConfig, σ::Float64)::Int
+    s  = env.agent_state
+    hs = glft_half_spread(s.net_Γ, s.S, σ, s.τ, config)
+    return nearest_spread_idx(hs, config)
+end
+
+# Symmetric (naive) policy: always return the same fixed spread level index.
+# Ignores all market conditions. Default is level 2 ($0.10 half-spread).
+function symmetric_spread_idx(; spread_level_idx::Int = 2)::Int
+    return spread_level_idx
+end
+
+# ============================================================
+# Section 2: Whalley-Wilmott Hedge Formula
+# ============================================================
+
+#=
+Whalley-Wilmott (1997) no-trade band halfwidth.
+
+WW solves the problem: given transaction costs κ, when is it optimal to rebalance?
+The answer is: only when your net-delta drifts outside a band of width ±H around zero.
+Inside the band, the cost of rebalancing exceeds the expected benefit. Outside, trade
+back to the band edge (not all the way to zero — that would overshoot).
+
+Formula: H = (3κ/(2φ) · Γ²·S²·σ²)^(1/3) · Δt^(1/3)
+
+The cubic root comes from balancing rebalancing cost (linear in trade size) against
+the expected drift cost (quadratic in delta). The Δt^(1/3) scaling means with more
+frequent rebalancing steps, each individual band can be tighter.
+
+Intuition for band width:
+  - Wide band (stay put): low gamma (delta moves slowly), high κ (expensive to trade)
+  - Narrow band (trade often): high gamma (delta moves fast), low κ (cheap to trade)
+
+Returns: half-width H in net-delta units
+=#
+function ww_band_halfwidth(Γ::Float64, S::Float64, σ::Float64, config::SimConfig)::Float64
+    κ  = config.κ
+    φ  = config.φ
+    Δt = config.Δt
+    # Dollar-gamma-squared: how fast the delta risk accumulates
+    dollar_gamma_sq = Γ^2 * S^2 * σ^2
+    dollar_gamma_sq = max(dollar_gamma_sq, 1e-10)  # guard against zero gamma
+    H = ((3κ / (2φ)) * dollar_gamma_sq)^(1/3) * Δt^(1/3)
+    return H
+end
+
+#=
+Whalley-Wilmott hedge policy.
+
+Logic:
+  1. Compute no-trade band halfwidth H
+  2. If |net_Δ| ≤ H → no_trade (inside the band, don't pay transaction costs)
+  3. If |net_Δ| > H → trade toward the band edge, not all the way to zero
+     Band edge is at sign(net_Δ) × H. We snap to the nearest Δ_target from there.
+=#
+function ww_hedge_idx(env::EnvironmentState, config::SimConfig, σ::Float64)::Int
+    s     = env.agent_state
+    net_Δ = s.net_Δ
+    H     = ww_band_halfwidth(s.net_Γ, s.S, σ, config)
+
+    if abs(net_Δ) <= H
+        return 1  # index 1 is always :no_trade by convention
     else
-        # Level 3: start from stationary distribution (agent doesn't know initial regime)
-        return copy(vs.vm.stationary_dist)
+        # Target the band edge: sign tells us direction, H tells us how far
+        band_edge = sign(net_Δ) * H
+        # Clamp to our grid range — Δ_targets[2] is the most negative numeric target
+        # (e.g. -0.3), Δ_targets[end] is the most positive (e.g. +0.3)
+        numeric_targets = Float64.(config.Δ_targets[2:end])
+        target = clamp(band_edge, minimum(numeric_targets), maximum(numeric_targets))
+        # Find nearest numeric Δ_target (skip index 1 which is :no_trade)
+        diffs = abs.(numeric_targets .- target)
+        return argmin(diffs) + 1  # +1 because we skipped index 1
     end
 end
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main Step Function
-# ─────────────────────────────────────────────────────────────────────────────
+# Naive delta hedge: always target net_Δ = 0.0, every step, no transaction cost awareness.
+# This is the textbook Black-Scholes hedge — rebalance fully every step.
+function naive_hedge_idx(config::SimConfig)::Int
+    numeric_targets = Float64.(config.Δ_targets[2:end])
+    diffs = abs.(numeric_targets .- 0.0)
+    return argmin(diffs) + 1  # +1 to skip :no_trade at index 1
+end
 
-#=
-Advance the environment by one timestep given the agent's chosen action.
+# ============================================================
+# Section 3: Combined Policies → MarketMakingAction
+# ============================================================
 
-Inputs:
-  env            — current EnvironmentState (holds AgentState, VolState, options)
-  portfolio      — ground-truth Portfolio (inventory, spot, cash)
-  action         — MarketMakingAction chosen by the agent for this step
-  config         — SimConfig (parameters, action space)
-  rng            — random number generator (pass for reproducibility)
-  belief_update_fn — optional: Hamilton filter for Level 3. Signature:
-                     (belief, log_return, fill, options, S, config) → new_belief
-                     Pass `nothing` for Levels 1 and 2.
-
-Returns:
-  next_state   — AgentState at t+1 (what the agent observes next)
-  reward       — scalar reward r_t = ΔWealth - φ·net_Δ²
-  done         — true if the episode is complete
-  log_return   — log(S_new/S): returned for logging and Level 3 belief update
-  fill         — FillOutcome: returned for logging and Level 3 belief update
-=#
-function step_environment!(
+# Primary benchmark: GLF-T spread + Whalley-Wilmott hedge.
+# Pass σ_fn result as σ. For oracle: σ = get_σ(env.vol_state). For constant: σ = 0.20.
+function glft_ww_policy(
     env::EnvironmentState,
     portfolio::Portfolio,
-    action::MarketMakingAction,
     config::SimConfig,
+    σ::Float64
+)::MarketMakingAction
+    return MarketMakingAction(
+        glft_spread_idx(env, config, σ),
+        ww_hedge_idx(env, config, σ)
+    )
+end
+
+# Sanity floor: fixed spread + naive BS delta hedge.
+function symmetric_naive_policy(
+    env::EnvironmentState,
+    portfolio::Portfolio,
+    config::SimConfig,
+    σ::Float64;
+    spread_level_idx::Int = 2
+)::MarketMakingAction
+    return MarketMakingAction(
+        symmetric_spread_idx(; spread_level_idx = spread_level_idx),
+        naive_hedge_idx(config)
+    )
+end
+
+# ============================================================
+# Section 4: Benchmark Runner
+# ============================================================
+
+#=
+Run a benchmark policy for n_episodes and collect per-step and per-episode statistics.
+
+Args:
+  policy_fn  — function (env, portfolio, config, σ) → MarketMakingAction
+  σ_fn       — function (env) → Float64
+               Oracle:       env -> get_σ(env.vol_state)   uses true regime vol
+               Constant-vol: env -> 0.20                   ignores regime
+  vol_model  — VolModel used to initialize episodes
+  config     — SimConfig
+  n_episodes — number of Monte Carlo episodes to run
+  rng        — seeded AbstractRNG for reproducibility
+  level      — simulation level (1 = constant vol, 2 = known regime, 3 = hidden)
+
+Returns a NamedTuple:
+  episode_pnl     — Vector{Float64}: total reward per episode
+  sharpe          — Float64: mean(episode_pnl) / std(episode_pnl)
+  mean_spread_idx — Float64: average spread level index chosen across all steps
+  hedge_freq      — Float64: fraction of steps where a hedge trade occurred (not :no_trade)
+  mean_abs_net_Δ  — Float64: average |net_Δ| across all steps (hedging quality)
+=#
+function run_benchmark(
+    policy_fn,
+    σ_fn,
+    vol_model::VolModel,
+    config::SimConfig,
+    n_episodes::Int,
     rng::AbstractRNG;
-    belief_update_fn = nothing,
-    level::Int = 2
+    level::Int = 1
 )
-    # ── 1. Unpack current state ──────────────────────────────────────────────
-    ag        = env.agent_state
-    vs        = env.vol_state
-    S         = ag.S
-    τ         = ag.τ
-    vm        = vs.vm
-    σ_regimes = vm.σ_levels
-    n_regimes = length(σ_regimes)
+    episode_pnl    = Vector{Float64}(undef, n_episodes)
+    all_spread_idx = Float64[]
+    all_hedged     = Bool[]
+    all_net_Δ      = Float64[]
 
-    agent_belief  = ag.regime_belief
-    market_belief = market_regime_belief(vs)  # true transition row from current regime
+    for ep in 1:n_episodes
+        # Initialize a fresh episode
+        env       = EnvironmentState(
+            AgentState(
+                config.S0,
+                config.T_option * config.Δt,
+                0.0, 0.0, 0.0, 0.0,
+                fill(1.0 / length(vol_model.σ_levels), length(vol_model.σ_levels))
+            ),
+            VolState(vol_model),
+            OptionContract[OptionContract(round(config.S0), true)],
+            0
+        )
+        portfolio = Portfolio()
+        push!(portfolio.option_quantities, 0)
 
-    # ── 2. Look up action parameters ────────────────────────────────────────
-    half_spread    = config.spread_levels[action.spread_idx]
-    hedge_fraction = config.hedge_targets[action.hedge_idx]
+        initialize_episode!(env, portfolio, vol_model, config; level = level)
 
-    # ── 3. Compute fair values for quoting and fills ─────────────────────────
-    #
-    # V_believed: agent's best estimate of fair value, used to center its quotes.
-    #   Computed from agent's regime_belief — may differ from V_market in Level 3.
-    #
-    # V_market: market's consensus price, used to determine fill probabilities.
-    #   Computed from the true transition row (perfect knowledge of current regime).
-    #
-    # In Levels 1-2, agent_belief == market_belief, so V_believed == V_market
-    # and fills are symmetric. In Level 3 after a regime switch, these diverge,
-    # creating asymmetric fills that signal the agent its pricing is off.
-    #
-    # NOTE: Currently quotes only one option (index 1). Multi-strike extension
-    # would loop over env.current_options here, quoting each separately.
-    opt       = env.current_options[1]
-    V_believed = bs_all_belief_weighted(
-        S, opt.K, τ, σ_regimes, agent_belief, config.r; call=opt.is_call
-    ).price
-    V_market = bs_all_belief_weighted(
-        S, opt.K, τ, σ_regimes, market_belief, config.r; call=opt.is_call
-    ).price
+        ep_reward = 0.0
+        done      = false
 
-    # ── 4. Snapshot wealth before any action ────────────────────────────────
-    #
-    # Wealth = mark-to-market portfolio value + cash.
-    # Snapshotted NOW, before fills and hedge change inventory or cash.
-    # The reward is computed as wealth_after - wealth_before at the end.
-    port_before   = compute_portfolio(portfolio, env.current_options, S, τ, σ_regimes, agent_belief, config.r)
-    wealth_before = port_before.portfolio_value + portfolio.cash
+        while !done
+            σ      = σ_fn(env)
+            action = policy_fn(env, portfolio, config, σ)
 
-    # ── 5. Simulate fills ────────────────────────────────────────────────────
-    quotes = compute_quotes(V_believed, half_spread)
-    fill   = simulate_fills(quotes.bid_price, quotes.ask_price, V_market, config, rng)
+            push!(all_spread_idx, Float64(action.spread_idx))
+            push!(all_hedged,     config.Δ_targets[action.hedge_idx] != :no_trade)
+            push!(all_net_Δ,      abs(env.agent_state.net_Δ))
 
-    # ── 6. Update inventory and cash from fills ──────────────────────────────
-    update_from_fills!(portfolio, fill, 1)
-
-    # ── 7. Recompute Δ_options POST-fills ────────────────────────────────────
-    #
-    # Fills changed option_quantities, so Δ_options has changed.
-    # The hedge must target the CURRENT delta exposure, not pre-fill delta.
-    # This is the correct behavior: the agent hedges what it actually holds.
-    port_post_fills = compute_portfolio(
-        portfolio, env.current_options, S, τ, σ_regimes, agent_belief, config.r
-    )
-
-    # ── 8. Execute hedge against updated Δ_options ──────────────────────────
-    shares_traded, hedge_cost = execute_hedge!(
-        portfolio, hedge_fraction, port_post_fills.Δ_options, S, config
-    )
-
-    # ── 9. Step the market ───────────────────────────────────────────────────
-    #
-    # The market moves AFTER the agent has quoted and hedged.
-    # This move generates the bulk of the reward: option and spot values
-    # change as S moves, and the agent's hedge quality determines the P&L.
-    S_new, vs_new, log_return = step_spot(S, vs, config, rng)
-    τ_new = τ - config.Δt
-
-    # ── 10. Handle option expiry ─────────────────────────────────────────────
-    #
-    # Use a small tolerance rather than exact zero comparison to handle
-    # floating point drift from repeated subtraction of 1/252.
-    done = false
-    if τ_new < config.Δt / 2
-        reset_for_new_option!(portfolio, env.current_options, S_new)
-        env.options_completed += 1
-        τ_new = config.T_option * config.Δt  # reset τ for new option
-
-        if env.options_completed >= config.n_options_per_episode
-            done = true
+            _, reward, done, _, _ = step_environment!(
+                env, portfolio, action, config, rng; level = level
+            )
+            ep_reward += reward
         end
+
+        episode_pnl[ep] = ep_reward
     end
 
-    # ── 11. Update regime belief ─────────────────────────────────────────────
-    regime_belief_new = update_belief(
-        agent_belief, vs_new, n_regimes, level,
-        log_return, fill, env.current_options, S_new, τ_new, config,
-        belief_update_fn
+    μ     = mean(episode_pnl)
+    σ_pnl = std(episode_pnl)
+    sharpe = σ_pnl > 1e-10 ? μ / σ_pnl : 0.0
+
+    return (
+        episode_pnl     = episode_pnl,
+        sharpe          = sharpe,
+        mean_spread_idx = mean(all_spread_idx),
+        hedge_freq      = mean(all_hedged),
+        mean_abs_net_Δ  = mean(all_net_Δ)
     )
-
-    # ── 12. Snapshot wealth after ────────────────────────────────────────────
-    #
-    # Use new S, new τ, new belief, and updated portfolio (post-fills, post-hedge).
-    # The difference wealth_after - wealth_before captures:
-    #   + spread income from fills (via cash changes in update_from_fills!)
-    #   + option mark-to-market change as S moved (via portfolio_value change)
-    #   + spot hedge mark-to-market change as S moved (via portfolio_value change)
-    #   - hedge transaction costs (via cash deduction in execute_hedge!)
-    port_after   = compute_portfolio(
-        portfolio, env.current_options, S_new, τ_new, σ_regimes, regime_belief_new, config.r
-    )
-    wealth_after = port_after.portfolio_value + portfolio.cash
-
-    # ── 13. Compute reward ───────────────────────────────────────────────────
-    net_Δ_after = port_after.Δ_options + portfolio.q_spot
-    reward      = compute_reward(wealth_before, wealth_after, net_Δ_after, config)
-
-    # ── 14. Build next agent state ───────────────────────────────────────────
-    next_state = build_agent_state(
-        portfolio, env.current_options, S_new, τ_new, regime_belief_new, σ_regimes, config.r
-    )
-
-    # ── 15. Update environment ───────────────────────────────────────────────
-    env.agent_state = next_state
-    env.vol_state   = vs_new
-
-    return next_state, reward, done, log_return, fill
-end
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Belief Update Router
-# ─────────────────────────────────────────────────────────────────────────────
-
-#=
-Routes belief update to the correct logic based on simulation level.
-
-Level 1 (n_regimes == 1 or level == 1):
-  Belief is always [1.0]. No update needed.
-
-Level 2 (no belief_update_fn provided):
-  Agent has perfect observability. After each market step, the agent
-  knows the true new regime → one-hot encoding of vs_new.regime_idx.
-
-Level 3 (belief_update_fn provided):
-  Hamilton filter from belief_updater.jl. The function receives the prior
-  belief, the log return, and the fill outcome, and returns a posterior.
-  Implemented in Module 12.
-
-This router is a separate function so step_environment! stays readable.
-=#
-function update_belief(
-    belief_old::Vector{Float64},
-    vs_new::VolState,
-    n_regimes::Int,
-    level::Int,
-    log_return::Float64,
-    fill::FillOutcome,
-    options::Vector{OptionContract},
-    S_new::Float64,
-    τ_new::Float64,
-    config::SimConfig,
-    belief_update_fn
-)
-    if n_regimes == 1 || level == 1
-        return [1.0]
-
-    elseif belief_update_fn === nothing
-        # Level 2: perfect observability → one-hot on true regime
-        return [vs_new.regime_idx == i ? 1.0 : 0.0 for i in 1:n_regimes]
-
-    else
-        # Level 3: Hamilton filter (Module 12)
-        return belief_update_fn(belief_old, log_return, fill, options, S_new, τ_new, config)
-    end
 end

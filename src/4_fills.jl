@@ -1,14 +1,5 @@
 using Random
 
-# Record of what happended at each timestep
-struct FillOutcome
-    bid_filled::Bool
-    ask_filled::Bool
-    bid_price::Float64
-    ask_price::Float64
-    V_market::Float64
-end
-
 #=
 - Compute the agent's bid and ask centered around its believed fair value which comes
 from bs_all_belief_weighted().
