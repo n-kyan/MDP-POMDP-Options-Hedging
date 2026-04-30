@@ -1,5 +1,9 @@
 # Project Context: Options Market Making Under Uncertainty
 
+
+
+robert.green@colorado.edu
+
 ## One-Line Summary
 
 A market maker quotes bids and asks on options at a single strike, manages inventory by delta-hedging the underlying, and jointly optimizes spread width and hedge ratio. Modules 1–8 are complete. The derivatives paper (due April 17) uses analytical benchmark results from Module 8. The DMU paper (due April 30) adds RL solvers (Modules 9–13).
