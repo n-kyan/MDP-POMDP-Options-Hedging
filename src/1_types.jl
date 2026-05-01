@@ -3,29 +3,27 @@ using StatsBase: sample, Weights
 
 Base.@kwdef struct SimConfig
     # --- Market parameters ---
-    S0::Float64 = 100.0              # initial spot price
-    r::Float64 = 0.05                # risk-free rate (annualized)
-    Δt::Float64 = 1/252              # timestep in years (1 trading day)
+    S0::Float64 = 100.0
+    r::Float64 = 0.05          # risk-free rate (annualized)
+    Δt::Float64 = 1/252        # timestep in years (1 trading day)
 
     # --- Option parameters ---
-    T_option::Int = 63               # trading days per option lifetime
-    n_options_per_episode::Int = 8    # sequential options per training episode
+    T_option::Int = 30         # trading days per option lifetime (~1 month)
+    n_options_per_episode::Int = 5
 
     # --- Transaction costs ---
-    κ::Float64 = 0.001               # proportional cost (10 bps)
+    κ::Float64 = 0.001         # proportional hedge cost (10 bps)
 
     # --- Fill model (AS 2008) ---
-    A::Float64 = 140.0               # fill intensity  
-    k::Float64 = 6.0                 # fill decay rate (calibrated for options)
-    γ_market::Float64 = 0.1          # dealer risk aversion for analytical benchmarks
+    A::Float64 = 140.0         # fill intensity scale
+    k::Float64 = 6.0           # fill decay rate
+    γ_market::Float64 = 0.1   # risk aversion used in GLF-T benchmark formula
 
     # --- Reward ---
-    φ::Float64 = 0.01                # risk aversion (delta penalty weight)
-
-    # --- Action space ---
-    spread_levels::Vector{Float64} = [0.05, 0.10, 0.20, 0.40, 0.80, 1.60]
-    Δ_targets::Vector{Union{Symbol, Float64}} = [:no_trade, -0.3, -0.25, -0.2, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]
+    φ::Float64 = 0.01          # agent risk aversion (delta penalty weight)
 end
+
+# ---- Volatility model (hidden from agent) -------------------------
 
 struct VolModel
     σ_levels::Vector{Float64}
@@ -37,137 +35,125 @@ struct VolModel
         transition_matrix::Matrix{Float64} = ones(1, 1),
     )
         n = length(σ_levels)
-
-        # Validations
-        # all volatilities positive
-        all(σ .> 0.0 for σ in σ_levels) || error(
-            "All σ_levels must be positive, got $σ_levels"
-        )
-
-        # transition matrix is square and matches number of regimes
-        size(transition_matrix) == (n, n) || error(
-            "Transition matrix must be $(n)×$(n), got $(size(transition_matrix))"
-        )
-        # all entries non-negative
-        all(transition_matrix .>= 0.0) || error(
-            "Transition matrix entries must be non-negative"
-        )
-        # rows sum to 1 (row-stochastic)
+        all(σ .> 0.0 for σ in σ_levels) || error("All σ_levels must be positive")
+        size(transition_matrix) == (n, n) || error("Transition matrix must be $(n)×$(n)")
+        all(transition_matrix .>= 0.0) || error("Transition matrix entries must be non-negative")
         for i in 1:n
-            row_sum = sum(transition_matrix[i, :])
-            isapprox(row_sum, 1.0; atol=1e-9) || error(
-               "Row $i of transition matrix sums to $(sum(transition_matrix[i, :])), not 1.0"
-            )
+            isapprox(sum(transition_matrix[i, :]), 1.0; atol=1e-9) ||
+                error("Row $i of transition matrix does not sum to 1")
         end
 
-        # Calculate Stationary Dist
         if n == 1
-            π = [1.0] # π means stationary_dist
+            π = [1.0]
         elseif n == 2
-            p1_1 = transition_matrix[1, 1] # P(stay in current regime)
-            p2_2 = transition_matrix[2, 2] # P(stay in current regime)
-
-            # Regime switch probabilities
-            p1_2 = 1.0 - p1_1
-            p2_1 = 1.0 - p2_2
-
-            denominator = p1_2 + p2_1
-            if denominator ≈ 0.0
-                π = [0.5, 0.5]
-            else
-                π = [p2_1/denominator, p1_2/denominator]
-            end
+            p12 = 1.0 - transition_matrix[1, 1]
+            p21 = 1.0 - transition_matrix[2, 2]
+            denom = p12 + p21
+            π = denom ≈ 0.0 ? [0.5, 0.5] : [p21/denom, p12/denom]
         else
-            error("3+ regimes not yet implemented in VolModel for this project. Use 1-2 regimes.")
+            error("3+ regimes not implemented. Use 1-2 regimes.")
         end
-        new(σ_levels, transition_matrix, π,)
+        new(σ_levels, transition_matrix, π)
     end
 end
 
 struct VolState
-    vm::VolModel # stationary dist from VolModel
-    regime_idx::Int # initial regime needs to come from a random sample from the dist in VolModel.
+    vm::VolModel
+    regime_idx::Int
 
-    # Default constructor: sample from stationary distribution
     function VolState(vm::VolModel)
         regime_idx = sample(1:length(vm.σ_levels), Weights(vm.stationary_dist))
         new(vm, regime_idx)
     end
 
-    # Explicit constructor: used when transitioning to a known regime
     function VolState(vm::VolModel, regime_idx::Int)
         new(vm, regime_idx)
     end
 end
 
-# get helper to make code more readable
 get_σ(vs::VolState) = vs.vm.σ_levels[vs.regime_idx]
+
+# Returns the transition-row belief — what the market uses to price options.
+# The agent never calls this directly; it is used internally for reward computation.
+function perfect_regime_belief(vs::VolState)
+    return vs.vm.transition_matrix[vs.regime_idx, :]
+end
+
+# ---- Option and portfolio structs --------------------------------
 
 struct OptionContract
     K::Float64
     is_call::Bool
 end
 
-# Total number of discrete actions (spread levels × hedge targets).
-n_actions(config::SimConfig) = length(config.spread_levels) * length(config.Δ_targets)
-
-# Agent's chosen action: which spread level and which hedge target.
-struct MarketMakingAction
-    spread_idx::Int
-    hedge_idx::Int
-end
-
-function action_from_index(i::Int, config::SimConfig)
-    n_hedge = length(config.Δ_targets)
-    spread_idx = div(i - 1, n_hedge) + 1
-    hedge_idx = mod(i - 1, n_hedge) + 1
-    return MarketMakingAction(spread_idx, hedge_idx)
-end
-
-function action_to_index(a::MarketMakingAction, config::SimConfig)
-    n_hedge = length(config.Δ_targets)
-    return (a.spread_idx - 1) * n_hedge + a.hedge_idx
-end
-
-struct AgentState # Agents observable states
-    S::Float64
-    τ::Float64
-    net_Δ::Float64 # portfolio Δ
-    net_Γ::Float64 # portfolio Γ
-    net_ν::Float64 # portfolio ν
-    net_Θ::Float64 # portfolio Θ
-    regime_belief::Vector{Float64} # Vector of beliefs of what is current regime
-end
-
-mutable struct EnvironmentState
-    agent_state::AgentState            # the agent's observable state
-    vol_state::VolState                  # true regime (hidden in Level 3)
-    current_options::Vector{OptionContract}       # the options currently being traded. Will start with calls only and add puts of the same expiry and strike later
-    options_completed::Int               # count of expired options this episode
-end
-
-# Returns beliefs if you had perfect knowledge. Used by the market to calc true options value
-function perfect_regime_belief(vs::VolState)
-    return vs.vm.transition_matrix[vs.regime_idx, :]
-end
-
 mutable struct Portfolio
-    option_quantities::Vector{Int} # length of 1 right now since only trading calls and a single strike and single expiry
+    option_quantities::Vector{Int}
     q_spot::Float64
     cash::Float64
 
-    function Portfolio() # Constructor for preallocated empty portfolio 
-        new(Int[], 0.0, 0.0)
-    end
+    Portfolio() = new(Int[], 0.0, 0.0)
 end
 
-# Record of what happended at each timestep
+# ---- Actions -----------------------------------------------------
+
+# Continuous action: half-spread δ and target portfolio delta Δ_target.
+#
+# Economic bounds (enforced by policy, not the environment):
+#   δ       ∈ [κ·S·|hat_Δ|,  hat_V]     — covers hedge cost; below option value
+#   Δ_target ∈ [min(0, hat_Δ_P), max(0, hat_Δ_P)]  — reduce |Δ| without flipping sign
+struct MarketMakingAction
+    δ::Float64          # half-spread in dollars
+    Δ_target::Float64   # desired net portfolio delta after hedging
+end
+
+# ---- Agent state (observation + belief-derived quantities) -------
+
+# o_t = (r_t, hat_Δ_P, hat_Γ_P, f_t, τ) per the paper.
+# S, σ_hat, hat_V, hat_Δ are included because policies need them to compute action bounds.
+struct AgentState
+    # Core observation
+    r_t::Float64        # log return this step (NaN at episode start)
+    hat_Δ_P::Float64    # net portfolio delta under σ_hat (options + spot position)
+    hat_Γ_P::Float64    # portfolio gamma under σ_hat
+    f_t::Int            # fill indicator: +1 bid only, -1 ask only, 0 no/both
+    τ::Float64          # time to expiry (years)
+
+    # Belief and action-bound quantities
+    σ_hat::Float64      # particle filter vol estimate (weighted mean)
+    hat_V::Float64      # believed option value under σ_hat
+    hat_Δ::Float64      # per-contract delta under σ_hat (for lower bound of δ)
+    S::Float64          # spot price (for action lower bound κ·S·|hat_Δ|)
+end
+
+# ---- Environment state -------------------------------------------
+
+mutable struct EnvironmentState
+    agent_state::AgentState
+    vol_state::VolState
+    current_options::Vector{OptionContract}
+    options_completed::Int
+end
+
+# ---- Particle filter (belief over σ) -----------------------------
+
+# Maintains a particle approximation of p(σ* | history).
+# Stored in log-space for numerical stability.
+# Weights are stored as log-unnormalized; call get_weights() to normalize.
+mutable struct ParticleFilter
+    log_σ::Vector{Float32}   # log of each particle's σ estimate
+    log_w::Vector{Float64}   # log unnormalized weights (avoids underflow)
+    n::Int
+end
+
+# ---- Step information --------------------------------------------
+
 struct FillOutcome
     bid_filled::Bool
     ask_filled::Bool
     bid_price::Float64
     ask_price::Float64
     V_market::Float64
+    f_t::Int   # +1 bid only, -1 ask only, 0 no fill or simultaneous fills
 end
 
 struct StepInfo
@@ -177,4 +163,14 @@ struct StepInfo
     hedge_cost::Float64
     wealth_before::Float64
     wealth_after::Float64
+end
+
+# ---- POMDP observation type (shared by Module 9 and 10) ----------
+
+# Minimal observation for vol inference: log-return (continuous vol signal)
+# and fill indicator (discrete directional signal).
+# S, τ, and portfolio quantities are fully observable from state and excluded.
+struct OptionsMMObs
+    r_t::Float64
+    f_t::Int     # +1 bid only, -1 ask only, 0 otherwise
 end

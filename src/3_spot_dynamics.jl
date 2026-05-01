@@ -27,7 +27,7 @@ function step_spot(
     end
 
 
-    # Step 4: Log return (used by Hamilton filter)
+    # Step 4: Log return (observed by agent; used by particle filter for belief update)
     log_return = log(S_new / S)
 
     return S_new, vs, log_return  # vol state doesn't change for constant vol

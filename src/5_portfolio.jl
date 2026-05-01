@@ -1,61 +1,63 @@
-
+# Compute portfolio-level Greeks and value under a single believed σ.
+# Returns hat_Δ_P (net delta including spot), hat_Γ_P, and option value.
 function compute_portfolio(
     portfolio::Portfolio,
     options::Vector{OptionContract},
     S::Float64,
     τ::Float64,
-    σ_regimes::Vector{Float64},
-    regime_beliefs::Vector{Float64},
+    σ::Float64,     # agent's believed vol (from particle filter)
     r::Float64,
 )
     option_value = 0.0
-    Δ_options = 0.0
-    Γ_net     = 0.0
-    ν_net     = 0.0
-    Θ_net     = 0.0
+    Δ_options    = 0.0
+    Γ_net        = 0.0
 
     for (q, opt) in zip(portfolio.option_quantities, options)
-        q == 0 && continue  # skip flat positions to avoid unnecessary BS calls
-
-        bs = bs_all_belief_weighted(S, opt.K, τ, σ_regimes, regime_beliefs, r; call=opt.is_call)
-
+        q == 0 && continue
+        bs = bs_all(S, opt.K, τ, σ, r; call = opt.is_call)
         option_value += q * bs.price
         Δ_options    += q * bs.Δ
         Γ_net        += q * bs.Γ
-        ν_net        += q * bs.ν
-        Θ_net        += q * bs.Θ
     end
 
-    Δ_net = Δ_options + portfolio.q_spot
-    portfolio_value = option_value + (portfolio.q_spot * S)
-
-    return (; portfolio_value, Δ_net, Δ_options, Γ_net, ν_net, Θ_net)
+    hat_Δ_P = Δ_options + portfolio.q_spot
+    return (; option_value, hat_Δ_P, Γ_net)
 end
 
-function update_from_fills!(
+# Compute total portfolio wealth using the TRUE market option value.
+# Used for the P&L component of the reward (not the risk penalty).
+function compute_true_wealth(
     portfolio::Portfolio,
-    fill::FillOutcome,
-    option_idx::Int # which option is this for. Only 1 option in this proj for now
+    options::Vector{OptionContract},
+    S::Float64,
+    τ::Float64,
+    vs::VolState,
+    r::Float64,
 )
-    if fill.bid_filled
-        portfolio.option_quantities[option_idx] += 1
-        portfolio.cash -= fill.bid_price
+    market_belief = perfect_regime_belief(vs)
+    option_value  = 0.0
+
+    for (q, opt) in zip(portfolio.option_quantities, options)
+        q == 0 && continue
+        V_market = bs_all_belief_weighted(
+            S, opt.K, τ, vs.vm.σ_levels, market_belief, r; call = opt.is_call
+        ).price
+        option_value += q * V_market
     end
 
-    if fill.ask_filled
-        portfolio.option_quantities[option_idx] -= 1
-        portfolio.cash += fill.ask_price
-    end
+    return option_value + portfolio.q_spot * S + portfolio.cash
 end
 
+# Hedge trade: adjust spot position so net portfolio delta equals Δ_target.
+# Δ_target is the agent's chosen residual exposure (continuous, from action).
 function execute_hedge!(
     portfolio::Portfolio,
-    target_Δ::Float64,
-    current_net_Δ::Float64,
+    Δ_target::Float64,
+    current_hat_Δ_P::Float64,
     S::Float64,
-    config::SimConfig
+    config::SimConfig,
 )
-    shares_to_trade = target_Δ - current_net_Δ
+    shares_to_trade = Δ_target - current_hat_Δ_P
     hedge_cost      = config.κ * abs(shares_to_trade) * S
 
     portfolio.cash   -= shares_to_trade * S + hedge_cost
@@ -64,62 +66,57 @@ function execute_hedge!(
     return shares_to_trade, hedge_cost
 end
 
+# Reward = true P&L (wealth change using market V*) − risk penalty on chosen exposure.
 function compute_reward(
     wealth_before::Float64,
     wealth_after::Float64,
-    net_Δ::Float64,
-    config::SimConfig
+    Δ_target::Float64,
+    config::SimConfig,
 )
-    pnl          = wealth_after - wealth_before
-    risk_penalty = config.φ * net_Δ^2
-    return pnl - risk_penalty
+    return (wealth_after - wealth_before) - config.φ * Δ_target^2
 end
 
-# Construct the agent-observable AgentState from current portfolio + market data.
+# Build the agent's observable state from current portfolio + market data + particle filter output.
 function build_agent_state(
     portfolio::Portfolio,
     options::Vector{OptionContract},
     S::Float64,
     τ::Float64,
-    regime_belief::Vector{Float64},
-    σ_regimes::Vector{Float64},
+    σ_hat::Float64,
     r::Float64,
+    r_t::Float64,   # log return this step (NaN at episode start)
+    f_t::Int,
 )
-    port = compute_portfolio(portfolio, options, S, τ, σ_regimes, regime_belief, r)
-    net_Δ = port.Δ_options + portfolio.q_spot
+    if isempty(options) || τ <= 0.0
+        return AgentState(r_t, 0.0, 0.0, f_t, τ, σ_hat, 0.0, 0.0, S)
+    end
 
-    return AgentState(
-        S,
-        τ,
-        net_Δ,
-        port.Γ_net,
-        port.ν_net,
-        port.Θ_net,
-        regime_belief
-    )
+    opt = options[1]
+    q   = portfolio.option_quantities[1]
+    bs  = bs_all(S, opt.K, τ, σ_hat, r; call = opt.is_call)
+
+    hat_Δ_P = q * bs.Δ + portfolio.q_spot
+    hat_Γ_P = q * bs.Γ
+
+    return AgentState(r_t, hat_Δ_P, hat_Γ_P, f_t, τ, σ_hat, bs.price, bs.Δ, S)
 end
 
-# Call this when current options expire to settle
-# S carries over and determines the new K
+# Settle expired options at intrinsic value and begin a new ATM contract.
+# The spot hedge position and particle filter carry over — only the option book resets.
 function reset_for_new_option!(
     portfolio::Portfolio,
     options::Vector{OptionContract},
-    S::Float64
+    S_new::Float64,
 )
-    # Settle all current positions at intrinsic value
     for (q, opt) in zip(portfolio.option_quantities, options)
         q == 0 && continue
-        intrinsic = opt.is_call ? max(S - opt.K, 0.0) : max(opt.K - S, 0.0)
+        intrinsic = opt.is_call ? max(S_new - opt.K, 0.0) : max(opt.K - S_new, 0.0)
         portfolio.cash += q * intrinsic
     end
 
-    # Clear old option book
     empty!(portfolio.option_quantities)
     empty!(options)
 
-    # Start new ATM call
-    new_K = round(S)
-    push!(options, OptionContract(new_K, true))
+    push!(options, OptionContract(round(S_new), true))
     push!(portfolio.option_quantities, 0)
 end
-
