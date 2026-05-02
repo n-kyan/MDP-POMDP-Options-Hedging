@@ -185,3 +185,8 @@ function bs_all_belief_weighted(
 
     return (price=total_price, Δ=total_Δ, Γ=total_Γ, ν=total_ν, Θ=total_Θ)
 end
+
+function calc_σ_level(transition_matrix::Matrix{Float64})
+
+    
+end

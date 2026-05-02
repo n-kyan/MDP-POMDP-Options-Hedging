@@ -5,6 +5,14 @@ using MCTS
 using POMDPTools
 using StatsBase: Weights, sample
 
+const VM_HARDY = VolModel(
+    [0.121, 0.269],
+    transition_matrix = [0.9982 0.0018;
+                         0.0022 0.9978]
+)
+const VM_CONST  = VolModel([0.20])
+const SIM_CONFIG = SimConfig()
+
 # ============================================================
 # Section 1: State and MDP definition
 # ============================================================
@@ -59,22 +67,16 @@ function POMDPs.gen(m::OptionsMM_MDP, s::MDPState, a::MarketMakingAction, rng::A
     r      = config.r
     Δt     = config.Δt
 
-    # Transition-row belief and oracle vol
+    # Transition-row belief: two-piece treatment
     ws        = vm.transition_matrix[s.regime_idx, :]
-    oracle_σ  = sqrt(sum(ws .* vm.σ_levels .^ 2))
+    σ²_blend  = sum(ws .* vm.σ_levels .^ 2)
+    bs_blend  = bs_all_belief_weighted(s.S, s.opt_K, s.τ, vm.σ_levels, ws, r; call = true)
 
-    # True market price (exact belief-weighted BS, not Jensen approximation)
-    V_market = bs_all_belief_weighted(
-        s.S, s.opt_K, s.τ, vm.σ_levels, ws, r; call = true
-    ).price
-
-    # Oracle agent: hat_V = V_market (no mispricing)
+    # Oracle agent: hat_V = belief-weighted BS price (correct under Jensen's inequality)
+    V_market  = bs_blend.price
     hat_V     = V_market
     bid_price = hat_V - a.δ
     ask_price = hat_V + a.δ
-
-    # Oracle BS Greeks (for delta computation)
-    bs = bs_all(s.S, s.opt_K, s.τ, oracle_σ, r; call = true)
 
     # Wealth before (marked at true V_market)
     wealth_before = s.cash + s.q_options * V_market + s.q_spot * s.S
@@ -88,15 +90,15 @@ function POMDPs.gen(m::OptionsMM_MDP, s::MDPState, a::MarketMakingAction, rng::A
     if fill.ask_filled; cash_new += ask_price; end
 
     # Hedge: bring net delta from post-fill position toward Δ_target
-    hat_Δ_P_post = q_new * bs.Δ + s.q_spot
+    hat_Δ_P_post = q_new * bs_blend.Δ + s.q_spot
     shares       = a.Δ_target - hat_Δ_P_post
     hedge_cost   = config.κ * abs(shares) * s.S
     cash_new    -= shares * s.S + hedge_cost
     q_spot_new   = s.q_spot + shares
 
-    # Spot step: GBM with oracle σ
+    # Spot step: GBM with transition-weighted variance
     Z     = randn(rng)
-    S_new = s.S * exp((r - 0.5 * oracle_σ^2) * Δt + oracle_σ * sqrt(Δt) * Z)
+    S_new = s.S * exp((r - 0.5 * σ²_blend) * Δt + sqrt(σ²_blend) * sqrt(Δt) * Z)
     τ_new = s.τ - Δt
 
     # Regime transition (true Hardy dynamics)
@@ -138,24 +140,41 @@ end
 struct OracleMDPActionSampler
     config::SimConfig
     vm::VolModel
+    rng::MersenneTwister
 end
 
 function MCTS.next_action(sampler::OracleMDPActionSampler, m::OptionsMM_MDP, s::MDPState, h)
-    config    = sampler.config
-    vm        = sampler.vm
-    ws        = vm.transition_matrix[s.regime_idx, :]
-    oracle_σ  = sqrt(sum(ws .* vm.σ_levels .^ 2))
-    bs        = bs_all(s.S, s.opt_K, s.τ, oracle_σ, config.r; call = true)
+    config   = sampler.config
+    vm       = sampler.vm
+    ws       = vm.transition_matrix[s.regime_idx, :]
+    σ²_blend = sum(ws .* vm.σ_levels .^ 2)
+    bs       = bs_all_belief_weighted(s.S, s.opt_K, s.τ, vm.σ_levels, ws, config.r; call = true)
 
     hat_Δ_P = s.q_options * bs.Δ + s.q_spot
+    hat_Γ_P = s.q_options * bs.Γ
 
-    δ_lo     = δ_lower_bound(s.S, bs.Δ, config)
-    δ_hi     = max(bs.price, δ_lo + 1e-6)
-    δ        = δ_lo + rand() * (δ_hi - δ_lo)
+    # GLF-T+WW reference action (center of the perturbation)
+    δ_glft = clamp_δ(glft_half_spread(hat_Γ_P, s.S, sqrt(σ²_blend), s.τ, config),
+                     s.S, bs.Δ, bs.price, config)
+    H      = ww_band_halfwidth(hat_Γ_P, s.S, sqrt(σ²_blend), config)
+    Δ_ww   = if abs(hat_Δ_P) <= H
+        hat_Δ_P
+    else
+        clamp(sign(hat_Δ_P) * H, min(0.0, hat_Δ_P), max(0.0, hat_Δ_P))
+    end
 
-    Δ_lo     = min(0.0, hat_Δ_P)
-    Δ_hi     = max(0.0, hat_Δ_P)
-    Δ_target = Δ_lo + rand() * (Δ_hi - Δ_lo + 1e-10)
+    # Action bounds
+    δ_lo = δ_lower_bound(s.S, bs.Δ, config)
+    δ_hi = max(bs.price, δ_lo + 1e-6)
+    Δ_lo = min(0.0, hat_Δ_P)
+    Δ_hi = max(0.0, hat_Δ_P)
+
+    # Perturb around GLF-T+WW with std = 20% of range; Δ_std floor of 0.05
+    # handles the zero-inventory case where Δ_hi - Δ_lo = 0
+    δ_std    = max((δ_hi - δ_lo) * 0.2, 1e-4)
+    Δ_std    = max((Δ_hi - Δ_lo) * 0.2, 0.05)
+    δ        = clamp(δ_glft + randn(sampler.rng) * δ_std, δ_lo, δ_hi)
+    Δ_target = clamp(Δ_ww  + randn(sampler.rng) * Δ_std, Δ_lo, Δ_hi)
 
     return MarketMakingAction(δ, Δ_target)
 end
@@ -173,16 +192,16 @@ function POMDPs.action(p::OracleGLFTRollout, s::MDPState)
     config   = p.config
     vm       = p.vm
     ws       = vm.transition_matrix[s.regime_idx, :]
-    oracle_σ = sqrt(sum(ws .* vm.σ_levels .^ 2))
-    bs       = bs_all(s.S, s.opt_K, s.τ, oracle_σ, config.r; call = true)
+    σ²_blend = sum(ws .* vm.σ_levels .^ 2)
+    bs       = bs_all_belief_weighted(s.S, s.opt_K, s.τ, vm.σ_levels, ws, config.r; call = true)
 
     hat_Δ_P = s.q_options * bs.Δ + s.q_spot
     hat_Γ_P = s.q_options * bs.Γ
 
-    δ_raw    = glft_half_spread(hat_Γ_P, s.S, oracle_σ, s.τ, config)
+    δ_raw    = glft_half_spread(hat_Γ_P, s.S, sqrt(σ²_blend), s.τ, config)
     δ        = clamp_δ(δ_raw, s.S, bs.Δ, bs.price, config)
 
-    H        = ww_band_halfwidth(hat_Γ_P, s.S, oracle_σ, config)
+    H        = ww_band_halfwidth(hat_Γ_P, s.S, sqrt(σ²_blend), config)
     Δ_target = if abs(hat_Δ_P) <= H
         hat_Δ_P
     else
@@ -198,10 +217,10 @@ end
 # ============================================================
 
 function make_mcts_solver(config::SimConfig, vm::VolModel;
-                          n_queries::Int = 50,
-                          max_depth::Int = 5,
+                          n_queries::Int = 200,
+                          max_depth::Int = 20,
                           exploration_constant::Float64 = 1.0,
-                          k_action::Float64 = 4.0,
+                          k_action::Float64 = 2.0,
                           alpha_action::Float64 = 0.5,
                           seed::Int = 42)
     return DPWSolver(
@@ -210,7 +229,7 @@ function make_mcts_solver(config::SimConfig, vm::VolModel;
         exploration_constant = exploration_constant,
         k_action             = k_action,
         alpha_action         = alpha_action,
-        next_action          = OracleMDPActionSampler(config, vm),
+        next_action          = OracleMDPActionSampler(config, vm, MersenneTwister(seed + 100)),
         estimate_value       = MCTS.RolloutEstimator(OracleGLFTRollout(config, vm)),
         rng                  = MersenneTwister(seed),
         keep_tree            = false,
@@ -226,8 +245,8 @@ function evaluate_mcts_mdp(
     config::SimConfig,
     n_episodes::Int,
     seed::Int;
-    n_queries::Int = 50,
-    max_depth::Int = 5,
+    n_queries::Int = 200,
+    max_depth::Int = 20,
 )
     mdp     = OptionsMM_MDP(config, vm)
     solver  = make_mcts_solver(config, vm; n_queries, max_depth, seed)
@@ -269,14 +288,11 @@ function evaluate_mcts_mdp(
             planner = solve(solver, mdp)
             action  = POMDPs.action(planner, mdp_state)
 
-            # Oracle σ for the true environment step
-            ws_cur     = vm.transition_matrix[env.vol_state.regime_idx, :]
-            σ_override = sqrt(sum(ws_cur .* vm.σ_levels .^ 2))
-
             # Execute in TRUE environment (Hardy dynamics)
+            ws_cur = vm.transition_matrix[env.vol_state.regime_idx, :]
             _, reward, done, _ = step_environment!(
                 env, portfolio, pf_dummy, action, config, rng_env;
-                σ_hat_override = σ_override,
+                oracle_regime = (vm.σ_levels, ws_cur),
             )
             ep_reward += reward
 
@@ -296,8 +312,8 @@ function evaluate_mcts_mdp(
         push!(episode_rewards, ep_reward)
     end
 
-    μ      = Statistics.mean(episode_rewards)
-    σ_pnl  = Statistics.std(episode_rewards)
+    μ      = mean(episode_rewards)
+    σ_pnl  = std(episode_rewards)
     sharpe = σ_pnl > 1e-10 ? μ / σ_pnl : 0.0
 
     return (episode_rewards = episode_rewards, mean_reward = μ, std_reward = σ_pnl, sharpe = sharpe)

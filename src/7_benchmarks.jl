@@ -183,11 +183,16 @@ function run_benchmark(
         initialize_episode!(env, portfolio, vol_model, config, pf)
 
         if use_oracle
-            σ_init = σ_fn(env)
-            env.agent_state = build_agent_state(
-                portfolio, env.current_options,
-                env.agent_state.S, env.agent_state.τ,
-                σ_init, config.r, NaN, 0,
+            ws_init = perfect_regime_belief(env.vol_state)
+            bs_init = bs_all_belief_weighted(
+                env.agent_state.S, env.current_options[1].K, env.agent_state.τ,
+                env.vol_state.vm.σ_levels, ws_init, config.r; call = env.current_options[1].is_call
+            )
+            q0 = portfolio.option_quantities[1]
+            env.agent_state = AgentState(
+                NaN, q0 * bs_init.Δ + portfolio.q_spot, q0 * bs_init.Γ,
+                0, env.agent_state.τ, sqrt(sum(ws_init .* env.vol_state.vm.σ_levels .^ 2)),
+                bs_init.price, bs_init.Δ, env.agent_state.S
             )
         end
 
@@ -203,7 +208,7 @@ function run_benchmark(
             push!(all_abs_hat_Δ_P, abs(env.agent_state.hat_Δ_P))
 
             _, reward, done, _ = step_environment!(env, portfolio, pf, action, config, rng;
-                                                   σ_hat_override = use_oracle ? σ : NaN)
+                                                   oracle_regime = use_oracle ? (env.vol_state.vm.σ_levels, perfect_regime_belief(env.vol_state)) : nothing)
             ep_reward += reward
         end
 

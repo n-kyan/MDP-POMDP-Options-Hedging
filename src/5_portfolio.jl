@@ -5,7 +5,7 @@ function compute_portfolio(
     options::Vector{OptionContract},
     S::Float64,
     τ::Float64,
-    σ::Float64,     # agent's believed vol (from particle filter)
+    σ::Float64,     # agent's believed vol
     r::Float64,
 )
     option_value = 0.0
@@ -25,7 +25,7 @@ function compute_portfolio(
 end
 
 # Compute total portfolio wealth using the TRUE market option value.
-# Used for the P&L component of the reward (not the risk penalty).
+# Used for the P&L component of the reward.
 function compute_true_wealth(
     portfolio::Portfolio,
     options::Vector{OptionContract},
@@ -102,7 +102,7 @@ function build_agent_state(
 end
 
 # Settle expired options at intrinsic value and begin a new ATM contract.
-# The spot hedge position and particle filter carry over — only the option book resets.
+# only the option book resets.
 function reset_for_new_option!(
     portfolio::Portfolio,
     options::Vector{OptionContract},

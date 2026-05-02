@@ -5,7 +5,7 @@ Base.@kwdef struct SimConfig
     # --- Market parameters ---
     S0::Float64 = 100.0
     r::Float64 = 0.05          # risk-free rate (annualized)
-    Δt::Float64 = 1/252        # timestep in years (1 trading day)
+    Δt::Float64 = 1 / 252        # timestep in years (1 trading day)
 
     # --- Option parameters ---
     T_option::Int = 30         # trading days per option lifetime (~1 month)
@@ -23,7 +23,7 @@ Base.@kwdef struct SimConfig
     φ::Float64 = 0.01          # agent risk aversion (delta penalty weight)
 end
 
-# ---- Volatility model (hidden from agent) -------------------------
+# ---- Volatility model -------------------------
 
 struct VolModel
     σ_levels::Vector{Float64}
@@ -32,7 +32,7 @@ struct VolModel
 
     function VolModel(
         σ_levels::Vector{Float64};
-        transition_matrix::Matrix{Float64} = ones(1, 1),
+        transition_matrix::Matrix{Float64}=ones(1, 1),
     )
         n = length(σ_levels)
         all(σ .> 0.0 for σ in σ_levels) || error("All σ_levels must be positive")
@@ -49,7 +49,7 @@ struct VolModel
             p12 = 1.0 - transition_matrix[1, 1]
             p21 = 1.0 - transition_matrix[2, 2]
             denom = p12 + p21
-            π = denom ≈ 0.0 ? [0.5, 0.5] : [p21/denom, p12/denom]
+            π = denom ≈ 0.0 ? [0.5, 0.5] : [p21 / denom, p12 / denom]
         else
             error("3+ regimes not implemented. Use 1-2 regimes.")
         end
@@ -73,8 +73,7 @@ end
 
 get_σ(vs::VolState) = vs.vm.σ_levels[vs.regime_idx]
 
-# Returns the transition-row belief — what the market uses to price options.
-# The agent never calls this directly; it is used internally for reward computation.
+# Returns the transition-row belief which is what the market uses to price options.
 function perfect_regime_belief(vs::VolState)
     return vs.vm.transition_matrix[vs.regime_idx, :]
 end
@@ -99,7 +98,7 @@ end
 # Continuous action: half-spread δ and target portfolio delta Δ_target.
 #
 # Economic bounds (enforced by policy, not the environment):
-#   δ       ∈ [κ·S·|hat_Δ|,  hat_V]     — covers hedge cost; below option value
+#   δ       ∈ [κ·S·|hat_Δ̂,  hat_V]     — covers hedge cost; below option value
 #   Δ_target ∈ [min(0, hat_Δ_P), max(0, hat_Δ_P)]  — reduce |Δ| without flipping sign
 struct MarketMakingAction
     δ::Float64          # half-spread in dollars
@@ -119,7 +118,7 @@ struct AgentState
     τ::Float64          # time to expiry (years)
 
     # Belief and action-bound quantities
-    σ_hat::Float64      # particle filter vol estimate (weighted mean)
+    σ_hat::Float64      # vol estimate
     hat_V::Float64      # believed option value under σ_hat
     hat_Δ::Float64      # per-contract delta under σ_hat (for lower bound of δ)
     S::Float64          # spot price (for action lower bound κ·S·|hat_Δ|)

@@ -53,7 +53,7 @@ function step_environment!(
     action::MarketMakingAction,
     config::SimConfig,
     rng::AbstractRNG;
-    σ_hat_override::Float64 = NaN,
+    oracle_regime::Union{Nothing, Tuple{Vector{Float64}, Vector{Float64}}} = nothing,
 )
     s    = env.agent_state
     vs   = env.vol_state
@@ -64,10 +64,12 @@ function step_environment!(
     Δ_target = action.Δ_target
 
     # 1. Believed fair value and quotes
-    # Oracle benchmarks pass σ_hat_override = transition-weighted σ; RL agents use particle filter.
-    σ_hat_val = isnan(σ_hat_override) ? get_σ_hat(pf) : σ_hat_override
-    bs_hat    = bs_all(S, opt.K, τ, σ_hat_val, config.r; call = opt.is_call)
-    hat_V     = bs_hat.price
+    bs_hat = if oracle_regime !== nothing
+        bs_all_belief_weighted(S, opt.K, τ, oracle_regime[1], oracle_regime[2], config.r; call = opt.is_call)
+    else
+        bs_all(S, opt.K, τ, get_σ_hat(pf), config.r; call = opt.is_call)
+    end
+    hat_V = bs_hat.price
     bid_price = hat_V - δ
     ask_price = hat_V + δ
 
@@ -117,16 +119,17 @@ function step_environment!(
     reward = compute_reward(wealth_before, wealth_after, Δ_target, config)
 
     # 12. Build next agent state
-    σ_hat_new = if isnan(σ_hat_override)
-        get_σ_hat(pf)
+    next_state = if oracle_regime !== nothing
+        ws_new  = perfect_regime_belief(vs_new)
+        opt_new = env.current_options[1]
+        bs_new  = bs_all_belief_weighted(S_new, opt_new.K, τ_new, oracle_regime[1], ws_new, config.r; call = opt_new.is_call)
+        q_n     = portfolio.option_quantities[1]
+        AgentState(log_return, q_n * bs_new.Δ + portfolio.q_spot, q_n * bs_new.Γ,
+                   fill.f_t, τ_new, sqrt(sum(ws_new .* oracle_regime[1] .^ 2)),
+                   bs_new.price, bs_new.Δ, S_new)
     else
-        # Oracle mode: transition-weighted σ for the new vol state
-        ws = perfect_regime_belief(vs_new)
-        sqrt(sum(ws .* vs_new.vm.σ_levels .^ 2))
+        build_agent_state(portfolio, env.current_options, S_new, τ_new, get_σ_hat(pf), config.r, log_return, fill.f_t)
     end
-    next_state = build_agent_state(
-        portfolio, env.current_options, S_new, τ_new, σ_hat_new, config.r, log_return, fill.f_t
-    )
 
     env.agent_state = next_state
     env.vol_state   = vs_new
