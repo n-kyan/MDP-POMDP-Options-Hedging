@@ -154,7 +154,7 @@ function fig_cumulative_pnl(vol_model, config; env_name, seed=1234, save_path, n
         local_rng = MersenneTwister(seed + i)
         
         for _ in 1:n_chain
-            ep = run_episode(pol.fn, vol_model, config, local_rng; n_particles)
+            ep = run_episode(pol.fn, vol_model, config, local_rng; n_particles, use_oracle=true)
             for r in ep.cumulative_reward push!(combined_rewards, r + curr_total) end
             curr_total = combined_rewards[end]
             if i == 1 append!(regime_master, ep.regime_history) end
@@ -439,7 +439,7 @@ function run_evaluation(; n_episodes=1000, seed=42, n_particles=500)
 
     # MCTS evaluation
     println("\nEvaluating: MCTS MDP (Hardy, oracle)")
-    mcts_results = evaluate_mcts_mdp(VM_HARDY, SIM_CONFIG, n_episodes, seed; n_queries=200, max_depth=20)
+    mcts_results = evaluate_mcts_mdp(VM_HARDY, SIM_CONFIG, n_episodes, seed; n_queries=500, max_depth=20)
     @printf("MCTS MDP — mean P&L = %.4f  std = %.4f  Sharpe = %.4f\n",
             mcts_results.mean_reward, mcts_results.std_reward, mcts_results.sharpe)
 
@@ -448,7 +448,7 @@ function run_evaluation(; n_episodes=1000, seed=42, n_particles=500)
     trace_seed  = seed + 100
     regime_init = sample(MersenneTwister(trace_seed),
                          1:length(VM_HARDY.σ_levels), Weights(VM_HARDY.stationary_dist))
-    mcts_trace  = run_mcts_trace(VM_HARDY, SIM_CONFIG, trace_seed; regime_init)
+    mcts_trace  = run_mcts_trace(VM_HARDY, SIM_CONFIG, trace_seed; n_queries=500, max_depth=20, regime_init)
     glft_trace  = run_policy_trace(glft_ww_policy, VM_HARDY, SIM_CONFIG, trace_seed; regime_init)
 
     fig_mcts_trajectory(mcts_trace, glft_trace)

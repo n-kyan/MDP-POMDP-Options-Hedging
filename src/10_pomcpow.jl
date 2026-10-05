@@ -193,11 +193,9 @@ function POMCPOW.next_action(sampler::POWActionSampler, m::OptionsMM_POMDP, b, h
     bs      = bs_all(S, K, τ, σ_hat, config.r; call = true)
     hat_Δ_P = q * bs.Δ + q_spot
 
-    δ_glft         = glft_half_spread(bs.Γ, S, σ_hat, τ, config)
-    δ_glft_clamped = clamp_δ(δ_glft, S, bs.Δ, bs.price, config)
-
-    δ_raw = δ_glft_clamped * exp(0.3 * randn())
-    δ     = clamp_δ(δ_raw, S, bs.Δ, bs.price, config)
+    δ_lo     = δ_lower_bound(S, bs.Δ, config)
+    δ_hi     = max(bs.price, δ_lo + 1e-6)
+    δ        = δ_lo + rand() * (δ_hi - δ_lo)
 
     Δ_lo     = min(0.0, hat_Δ_P)
     Δ_hi     = max(0.0, hat_Δ_P)
@@ -298,13 +296,10 @@ end
 # ============================================================
 
 # Extract σ_hat from a POMCPOW particle belief.
-# Normalizes weights because BootstrapFilter can return unnormalized likelihoods
-# when ESS is high enough that resampling does not trigger.
 function belief_mean_σ(b)::Float64
-    ps    = particles(b)
-    ws    = weights(b)
-    total = sum(ws)
-    return sum(ws[i] * ps[i].σ_particle for i in eachindex(ps)) / total
+    ps = particles(b)
+    ws = weights(b)
+    return sum(ws[i] * ps[i].σ_particle for i in eachindex(ps)) / sum(ws)
 end
 
 # Build an initial WeightedParticleBelief from the prior distribution.
@@ -384,8 +379,7 @@ function evaluate_pomcpow(
             done_true = env.options_completed
             ps_synced = [POMDPState(S_true, p.σ_particle, q_true, K_true, qs_true, cash_true, τ_true, done_true)
                          for p in particles(belief)]
-            ws_raw    = weights(belief)
-            belief    = WeightedParticleBelief(ps_synced, ws_raw ./ sum(ws_raw))
+            belief = WeightedParticleBelief(ps_synced, weights(belief))
         end
 
         push!(episode_rewards, ep_reward)
@@ -397,102 +391,4 @@ function evaluate_pomcpow(
     sharpe = σ_pnl > 1e-10 ? μ / σ_pnl : 0.0
 
     return (episode_rewards = episode_rewards, mean_reward = μ, std_reward = σ_pnl, sharpe = sharpe)
-end
-
-# ============================================================
-# Section 10: Diagnostic trace
-# ============================================================
-
-# Per-step comparison: POMCPOW δ vs GLF-T δ at the same σ_hat.
-# Prints: step | true_σ | σ_hat | δ_pomcpow | δ_glft | fill_dir | q_after
-function diagnose_pomcpow(
-    vm::VolModel,
-    config::SimConfig;
-    n_episodes::Int  = 5,
-    seed::Int        = 42,
-    n_queries::Int   = 50,
-    max_depth::Int   = 5,
-    ξ::Float64       = 0.20,
-    n_particles::Int = 500,
-)
-    pomdp   = OptionsMM_POMDP(config, ξ)
-    solver  = make_pomcpow_solver(pomdp; n_queries, max_depth, seed)
-    planner = solve(solver, pomdp)
-    up      = updater(planner)
-    rng_env = MersenneTwister(seed + 1)
-    pf_dummy = ParticleFilter(10)
-
-    @printf("%-4s  %-7s  %-7s  %-10s  %-10s  %-5s  %-7s\n",
-            "step", "true_σ", "σ_hat", "δ_pomcpow", "δ_glft", "fill", "q_after")
-    println(repeat("-", 60))
-
-    for ep in 1:n_episodes
-        env = EnvironmentState(
-            AgentState(NaN, 0.0, 0.0, 0, config.T_option * config.Δt, 0.2, 0.0, 0.0, config.S0),
-            VolState(vm),
-            OptionContract[OptionContract(Float64(round(config.S0)), true)],
-            0,
-        )
-        portfolio = Portfolio()
-        push!(portfolio.option_quantities, 0)
-        initialize_episode!(env, portfolio, vm, config, pf_dummy)
-        belief = make_initial_belief(pomdp, rng_env, n_particles)
-
-        step_deltas   = Float64[]  # δ_pomcpow
-        step_glft     = Float64[]  # δ_glft at same σ_hat
-        n_narrower    = 0
-        ep_reward     = 0.0
-        done          = false
-        t             = 0
-
-        println("\n=== Episode $ep ===")
-        while !done
-            t += 1
-            σ_hat  = belief_mean_σ(belief)
-            action = POMDPs.action(planner, belief)
-
-            # true σ from regime transition row
-            ws_regime = perfect_regime_belief(env.vol_state)
-            true_σ    = sqrt(sum(ws_regime .* vm.σ_levels .^ 2))
-
-            # GLF-T δ at same σ_hat and current portfolio Greeks
-            hat_Γ_P = env.agent_state.hat_Γ_P
-            bs_glft = bs_all(env.agent_state.S, env.current_options[1].K,
-                              env.agent_state.τ, σ_hat, config.r; call = true)
-            δ_glft_raw = glft_half_spread(hat_Γ_P, env.agent_state.S, σ_hat, env.agent_state.τ, config)
-            δ_glft     = clamp_δ(δ_glft_raw, env.agent_state.S, bs_glft.Δ, bs_glft.price, config)
-
-            _, reward, done, info = step_environment!(
-                env, portfolio, pf_dummy, action, config, rng_env;
-                σ_hat_override = σ_hat,
-            )
-            ep_reward += reward
-
-            q_after   = portfolio.option_quantities[1]
-            fill_dir  = info.fill.f_t
-
-            @printf("%-4d  %-7.4f  %-7.4f  %-10.4f  %-10.4f  %-5d  %-7d\n",
-                    t, true_σ, σ_hat, action.δ, δ_glft, fill_dir, q_after)
-
-            push!(step_deltas, action.δ)
-            push!(step_glft,   δ_glft)
-            action.δ < δ_glft && (n_narrower += 1)
-
-            true_obs = OptionsMMObs(info.log_return, info.fill.f_t)
-            belief   = POMDPs.update(up, belief, action, true_obs)
-            ws_raw   = weights(belief)
-            ps_sync  = [POMDPState(env.agent_state.S, p.σ_particle,
-                                   portfolio.option_quantities[1],
-                                   isempty(env.current_options) ? Float64(round(env.agent_state.S)) : env.current_options[1].K,
-                                   portfolio.q_spot, portfolio.cash,
-                                   env.agent_state.τ, env.options_completed)
-                        for p in particles(belief)]
-            belief = WeightedParticleBelief(ps_sync, ws_raw ./ sum(ws_raw))
-        end
-
-        mean_δ_ratio = mean(step_deltas ./ step_glft)
-        pct_narrower = 100 * n_narrower / length(step_deltas)
-        @printf("  → ep_reward=%.2f  mean_δ_ratio=%.3f  pct_narrower=%.1f%%\n",
-                ep_reward, mean_δ_ratio, pct_narrower)
-    end
 end

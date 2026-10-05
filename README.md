@@ -6,7 +6,7 @@ A Julia implementation of a POMDP-based market maker that quotes bids and asks o
 
 The agent acts as a market maker in continuous time (discretized to daily steps, `Δt = 1/252`). At each step it chooses:
 
-- **Half-spread** `δ ∈ [κ·S·|Δ̂|, ]` — how wide to quote around its believed fair value
+- **Half-spread** `δ ∈ [κ·S·|Δ̂|, V̂]` — how wide to quote around its believed fair value
 - **Target portfolio delta** `Δ_target ∈ [min(0, Δ̂_P), max(0, Δ̂_P)]` — how aggressively to hedge
 
 The true volatility follows a **Hardy (2001) two-regime Markov chain** (`σ₁ = 12.1%`, `σ₂ = 26.9%`), which the agent does not observe. The market prices options using the true regime's forward-looking vol; the agent infers vol from a particle filter over log-returns and fill outcomes.

@@ -20,3 +20,11 @@ Naive + Naive             3.8691      3.7993      1.0184      0.1013       79.9%
 ────────────────────────────────────────────────────────────────────────────────────────────────
 
 Evaluating: MCTS MDP (Hardy, oracle)
+MCTS MDP — mean P&L = 2.7340  std = 2.8022  Sharpe = 0.9757
+
+Generating MCTS figures (running trace episode)...
+Saved: results/fig5_mcts_trajectory.png
+Saved: results/fig6_mcts_pnl_comparison.png
+Saved: results/fig7_mcts_action_scatter.png
+
+Evaluation complete. All outputs in results/

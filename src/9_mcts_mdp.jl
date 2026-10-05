@@ -96,9 +96,13 @@ function POMDPs.gen(m::OptionsMM_MDP, s::MDPState, a::MarketMakingAction, rng::A
     cash_new    -= shares * s.S + hedge_cost
     q_spot_new   = s.q_spot + shares
 
-    # Spot step: GBM with transition-weighted variance
+    # Spot step: GBM with the *true current-regime* variance (matches step_spot in
+    # 3_spot_dynamics.jl). σ²_blend is deliberately used above for oracle pricing
+    # (transition-row-weighted V*), but the actual price process only ever moves
+    # under the current regime's vol until it transitions.
+    σ²_true = vm.σ_levels[s.regime_idx]^2
     Z     = randn(rng)
-    S_new = s.S * exp((r - 0.5 * σ²_blend) * Δt + sqrt(σ²_blend) * sqrt(Δt) * Z)
+    S_new = s.S * exp((r - 0.5 * σ²_true) * Δt + sqrt(σ²_true) * sqrt(Δt) * Z)
     τ_new = s.τ - Δt
 
     # Regime transition (true Hardy dynamics)
@@ -161,6 +165,13 @@ function MCTS.next_action(sampler::OracleMDPActionSampler, m::OptionsMM_MDP, s::
         hat_Δ_P
     else
         clamp(sign(hat_Δ_P) * H, min(0.0, hat_Δ_P), max(0.0, hat_Δ_P))
+    end
+
+    # First widening call at this node: hand DPW the exact GLF-T+WW action,
+    # unperturbed. This guarantees the benchmark policy is always a candidate
+    # in the tree, so search can only improve on it, never lose to pure noise.
+    if isempty(children(h))
+        return MarketMakingAction(δ_glft, Δ_ww)
     end
 
     # Action bounds
